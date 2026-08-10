@@ -1,6 +1,6 @@
 {
   "name": "opencode-go-multi-auth",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "description": "Multi-account router plugin for OpenCode Go API subscriptions",
   "type": "module",
   "main": "./dist/index.js",
