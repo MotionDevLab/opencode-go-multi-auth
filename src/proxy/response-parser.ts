@@ -36,9 +36,9 @@ function extractUsageObject(source: Record<string, any> | undefined): ParsedUsag
   const tokens: TokenBreakdown = {
     input: source.input_tokens ?? source.prompt_tokens ?? 0,
     output: source.output_tokens ?? source.completion_tokens ?? 0,
-    cacheRead: source.cache_read_input_tokens ?? source.prompt_tokens_details?.cached_tokens ?? 0,
+    cacheRead: source.cache_read_input_tokens ?? source.prompt_tokens_details?.cached_tokens ?? source.input_tokens_details?.cached_tokens ?? 0,
     cacheWrite: source.cache_creation_input_tokens ?? 0,
-    reasoning: source.reasoning_output_tokens ?? source.completion_tokens_details?.reasoning_tokens ?? 0,
+    reasoning: source.reasoning_output_tokens ?? source.completion_tokens_details?.reasoning_tokens ?? source.output_tokens_details?.reasoning_tokens ?? 0,
   }
 
   const rawCost = source.cost ?? source.total_cost ?? source.estimated_cost
@@ -67,6 +67,13 @@ function parseJsonUsage(json: unknown): ParsedUsageData | null {
 
   if (value.type === 'message_delta' && value.usage) {
     usage = mergeUsage(usage, extractUsageObject(value.usage))
+  }
+
+  // The Responses API delivers usage inside response.completed, nested under
+  // response.usage. The non-streaming path already catches it via the top-level
+  // usage branch above; the streaming path lands here.
+  if (value.type === 'response.completed' && value.response?.usage) {
+    usage = mergeUsage(usage, extractUsageObject((value.response as Record<string, any>).usage))
   }
 
   if (value.message?.usage) {
