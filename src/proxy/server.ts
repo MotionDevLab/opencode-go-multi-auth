@@ -139,6 +139,12 @@ export class ProxyServer {
       ?? (getHeader(headers, 'prompt-cache-key') ? createProxySessionId(getHeader(headers, 'prompt-cache-key')!) : undefined)
 
     const attemptedKeyIds = new Set<string>()
+    // A 5xx that repeats on a second key is a property of the request or the
+    // upstream, not of the key: the same body failed the same way with
+    // different credentials. Only the first 5xx of a request counts against a
+    // key's circuit breaker, so one unroutable model cannot open every breaker
+    // in the pool and take healthy keys out of rotation for unrelated traffic.
+    let upstreamServerErrorSeen = false
     const totalKeys = this.keyManager.getActiveKeys().length
     const maxAttempts = totalKeys || 1
     let lastError = 'All API keys exhausted'
@@ -273,8 +279,14 @@ export class ProxyServer {
         }
 
         if (upstreamRes.status >= 500) {
-          const circuitState = this.circuitBreaker.recordFailure(key.id)
-          this.keyManager.markError(key.id)
+          const repeatedServerError = upstreamServerErrorSeen
+          upstreamServerErrorSeen = true
+          const circuitState = repeatedServerError
+            ? this.circuitBreaker.getState(key.id)
+            : this.circuitBreaker.recordFailure(key.id)
+          if (!repeatedServerError) {
+            this.keyManager.markError(key.id)
+          }
           this.keyManager.recordRequest(key.id, {
             statusCode: upstreamRes.status,
             durationMs: duration,
