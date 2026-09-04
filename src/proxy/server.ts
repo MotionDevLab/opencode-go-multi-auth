@@ -15,6 +15,7 @@ import {
   type QuotaErrorSignal,
 } from '../router/types.js'
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
+import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator } from './zen-responses.js'
 import { isQuota429, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
 import { estimateCost } from './rate-card.js'
@@ -83,6 +84,10 @@ export class ProxyServer {
   private server?: http.Server
   private readonly config: ProxyServerConfig
   private readonly sessionAffinity: SessionAffinityStore
+  // Models whose native zen chat/completions route 500s and that therefore
+  // must use the Responses API. Learned on the first 500 per model per
+  // process; a restart forgets it and re-learns if Zen ever fixes the route.
+  private readonly zenResponsesModelMemo = new Map<string, boolean>()
 
   constructor(
     config: ProxyServerConfig,
@@ -119,6 +124,13 @@ export class ProxyServer {
     if (isZenRequest && req.url) {
       req.url = req.url.replace(/^\/zen(\/|$)/, '/')
     }
+    // Zen's free models are split: some serve only chat/completions (laguna,
+    // nemotron), others only the Responses API (the muse contributor models).
+    // Unknown models start native and are switched to /responses only when the
+    // upstream proves their chat/completions route is dead; a model remembered
+    // here is translated up front so it pays no second round trip.
+    let translateZenResponses: boolean = false
+    let includeUsage: boolean = false
     const headers = req.headers as Record<string, string | string[] | undefined>
     const body = await this.readBody(req)
     if (body === null) {
@@ -132,7 +144,20 @@ export class ProxyServer {
       return
     }
 
-    const prepared = this.prepareRequest(body, targetPath)
+    let requestBody = body
+    const isZenChatCompletions = isZenRequest && req.method === 'POST' && req.url && isChatCompletionsPath(req.url.split('?')[0])
+    const requestModel = this.extractModelName(body)
+    if (isZenChatCompletions && requestModel && req.url && this.zenResponsesModelMemo.has(requestModel)) {
+      const translatedBody = toResponsesRequestBody(body)
+      if (translatedBody) {
+        requestBody = translatedBody
+        req.url = toResponsesPath(req.url)
+        translateZenResponses = true
+        includeUsage = this.bodyRequestsUsage(body)
+      }
+    }
+
+    let prepared = this.prepareRequest(requestBody, targetPath)
     const cacheHeaders = extractCacheHeaders(headers)
     const sessionKey = this.sessionAffinity.extractSessionKey(headers)
     const upstreamSessionId = getHeader(headers, 'x-session-id')
@@ -200,7 +225,7 @@ export class ProxyServer {
       }
 
       const startTime = Date.now()
-      const upstreamHungTimer = this.config.upstreamHungTimeoutMs > 0
+      let upstreamHungTimer = this.config.upstreamHungTimeoutMs > 0
         ? setTimeout(() => {
             if (!upstreamAbortController.signal.aborted) {
               upstreamAbortController.abort(new Error('upstream hung (no response within UPSTREAM_HUNG_TIMEOUT_MS)'))
@@ -210,7 +235,7 @@ export class ProxyServer {
 
       try {
         const fetchUrl = buildUpstreamUrl(upstreamUrl, req.url)
-        const upstreamRes = await fetch(fetchUrl, {
+        let upstreamRes = await fetch(fetchUrl, {
           method: req.method ?? 'GET',
           headers: upstreamHeaders,
           body: req.method !== 'GET' && req.method !== 'HEAD' ? prepared.body : undefined,
@@ -218,8 +243,78 @@ export class ProxyServer {
         })
         if (upstreamHungTimer) clearTimeout(upstreamHungTimer)
 
-        const duration = Date.now() - startTime
-        const responseTextPromise = upstreamRes.clone().text().catch(() => '')
+        let duration = Date.now() - startTime
+        let responseTextPromise = upstreamRes.clone().text().catch(() => '')
+
+        // A zen chat/completions request that 500s on its native endpoint may
+        // belong to a model only the Responses API can serve (the free
+        // contributor models). Retry ONCE in translated form on the SAME key:
+        // a protocol switch is not a key failure, so it must not consume a
+        // key-failover attempt. The per-model memo makes this a one-time cost
+        // per model per process. Only an exact 500 triggers this: 502/503/504
+        // are transient infra failures that fail over to the next key.
+        if (upstreamRes.status === 500 && isZenChatCompletions && !translateZenResponses && requestModel && req.url) {
+          const translatedBody = toResponsesRequestBody(body)
+          if (translatedBody) {
+            // Per-attempt snapshot: if the translated attempt also fails, the
+            // next key must start native again, not inherit the /responses URL.
+            const attemptUrl: string = req.url
+            const attemptBody: Buffer = requestBody
+            const attemptPrepared: RequestPreparation = prepared
+            const attemptTranslated: boolean = translateZenResponses
+            const attemptIncludeUsage: boolean = includeUsage
+            requestBody = translatedBody
+            req.url = toResponsesPath(req.url)
+            translateZenResponses = true
+            includeUsage = this.bodyRequestsUsage(body)
+            prepared = this.prepareRequest(requestBody, targetPath)
+            upstreamRes.body?.cancel().catch(() => {})
+            this.logStream.emit(this.logger, 'warn',
+              `Zen chat/completions 500 for "${requestModel}" - retrying via /responses on "${key.alias}"`, {
+                method: req.method,
+                path: targetPath,
+                statusCode: 500,
+                keyAlias: key.alias,
+                keyId: key.id,
+                model: requestModel,
+                strategy,
+                routeReason: reason,
+                upstream: 'zen',
+              })
+            if (this.config.upstreamHungTimeoutMs > 0) {
+              upstreamHungTimer = setTimeout(() => {
+                if (!upstreamAbortController.signal.aborted) {
+                  upstreamAbortController.abort(new Error('upstream hung (no response within UPSTREAM_HUNG_TIMEOUT_MS)'))
+                }
+              }, this.config.upstreamHungTimeoutMs)
+            }
+            const translatedFetchUrl = buildUpstreamUrl(upstreamUrl, req.url)
+            const translatedRes = await fetch(translatedFetchUrl, {
+              method: req.method ?? 'GET',
+              headers: upstreamHeaders,
+              body: req.method !== 'GET' && req.method !== 'HEAD' ? prepared.body : undefined,
+              signal: upstreamAbortController.signal,
+            })
+            if (upstreamHungTimer) clearTimeout(upstreamHungTimer)
+            // Only a translated 2xx proves the model needs the Responses
+            // endpoint. A 4xx (translation bug, bad key, quota) or a further
+            // 5xx must not pin the model: the next request starts native
+            // again. On a 5xx the per-attempt state is restored so the next
+            // key is tried natively, not forced down the translated path.
+            if (translatedRes.ok) {
+              this.zenResponsesModelMemo.set(requestModel, true)
+            } else if (translatedRes.status >= 500) {
+              req.url = attemptUrl
+              requestBody = attemptBody
+              prepared = attemptPrepared
+              translateZenResponses = attemptTranslated
+              includeUsage = attemptIncludeUsage
+            }
+            upstreamRes = translatedRes
+            duration = Date.now() - startTime
+            responseTextPromise = translatedRes.clone().text().catch(() => '')
+          }
+        }
 
         if (upstreamRes.status === 402 || upstreamRes.status === 429) {
           const responseBody = await responseTextPromise
@@ -320,11 +415,22 @@ export class ProxyServer {
         }
 
         const responseHeaders = this.buildResponseHeaders(upstreamRes)
-        res.writeHead(upstreamRes.status, responseHeaders)
-        if (upstreamRes.body) {
-          await this.pipeResponseBody(upstreamRes.body, res)
+        if (translateZenResponses && upstreamRes.status < 400 && upstreamRes.body) {
+          res.writeHead(upstreamRes.status, responseHeaders)
+          if (prepared.stream) {
+            await this.pipeTranslatedZenStream(upstreamRes.body, res, includeUsage)
+          } else {
+            const translatedBody = await responseTextPromise
+            res.end(toChatCompletion(translatedBody))
+            responseTextPromise = Promise.resolve(translatedBody)
+          }
         } else {
-          res.end()
+          res.writeHead(upstreamRes.status, responseHeaders)
+          if (upstreamRes.body) {
+            await this.pipeResponseBody(upstreamRes.body, res)
+          } else {
+            res.end()
+          }
         }
 
         const responseBody = await responseTextPromise
@@ -486,6 +592,27 @@ export class ProxyServer {
     }
   }
 
+  // Whether the caller opted into usage reporting on a streaming request.
+  // The translated Responses request does not carry stream_options, so the
+  // original chat/completions body is the only place this signal survives.
+  private bodyRequestsUsage(body: Buffer): boolean {
+    try {
+      const json = JSON.parse(body.toString('utf8')) as Record<string, unknown>
+      return Boolean(typeof json.stream_options === 'object' && json.stream_options && (json.stream_options as Record<string, unknown>).include_usage)
+    } catch {
+      return false
+    }
+  }
+
+  private extractModelName(body: Buffer): string | null {
+    try {
+      const json = JSON.parse(body.toString('utf8')) as Record<string, unknown>
+      return typeof json.model === 'string' && json.model.length > 0 ? json.model : null
+    } catch {
+      return null
+    }
+  }
+
   private buildResponseHeaders(upstreamRes: Response): Record<string, string> {
     const responseHeaders: Record<string, string> = {}
     upstreamRes.headers.forEach((value, key) => {
@@ -500,6 +627,62 @@ export class ProxyServer {
       }
     })
     return responseHeaders
+  }
+
+  /** Pipe a Zen Responses SSE stream to the client as chat.completion.chunk frames. */
+  private async pipeTranslatedZenStream(body: ReadableStream<Uint8Array>, res: http.ServerResponse, includeUsage = false): Promise<void> {
+    const reader = body.getReader()
+    const translator = new SseTranslator(includeUsage)
+    const decoder = new TextDecoder()
+    let buffered = ''
+
+    const processEvent = (rawEvent: string) => {
+      let eventName = ''
+      const dataLines: string[] = []
+      for (const line of rawEvent.split('\n')) {
+        if (line.startsWith('event:')) eventName = line.slice(6).trim()
+        else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+      }
+      // Multiple data: lines in one event are concatenated with '\n' per the
+      // SSE spec; a JSON payload split across lines reconstructs correctly.
+      const data = dataLines.join('\n')
+      if (eventName && data) {
+        const out = translator.translate(eventName, data)
+        if (out) res.write(out)
+      }
+    }
+
+    const processBuffer = () => {
+      let boundary = buffered.indexOf('\n\n')
+      while (boundary !== -1) {
+        const rawEvent = buffered.slice(0, boundary)
+        buffered = buffered.slice(boundary + 2)
+        processEvent(rawEvent)
+        boundary = buffered.indexOf('\n\n')
+      }
+    }
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        // Normalise CRLF before splitting on \n\n so a \r\n-stream frames the
+        // same way as an \n-stream.
+        buffered += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        processBuffer()
+      }
+      // Flush any remaining multi-byte sequence from the decoder, then treat
+      // whatever is still in the buffer (no trailing blank line) as a final
+      // event. A response.completed that arrives at stream end without \n\n
+      // would otherwise be silently dropped, leaving the client without
+      // finish_reason or [DONE].
+      buffered += decoder.decode()
+      processBuffer()
+      if (buffered.trim()) processEvent(buffered)
+      res.end()
+    } catch {
+      res.end()
+    }
   }
 
   private async pipeResponseBody(body: ReadableStream<Uint8Array>, res: http.ServerResponse): Promise<void> {
