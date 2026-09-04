@@ -16,6 +16,7 @@ const HOP_BY_HOP = new Set([
 const FORWARDED_HEADERS = new Set([
   'accept', 'accept-encoding', 'accept-language', 'content-type',
   'anthropic-version', 'anthropic-beta',
+  'x-opencode-session',
 ])
 
 export function isCacheHeader(name: string): boolean {
