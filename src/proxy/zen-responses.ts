@@ -11,13 +11,15 @@
 const CHAT_COMPLETIONS_SUFFIX = '/chat/completions'
 
 export function isChatCompletionsPath(path: string): boolean {
-  return path.endsWith(CHAT_COMPLETIONS_SUFFIX)
+  return path.replace(/\/+$/, '').endsWith(CHAT_COMPLETIONS_SUFFIX)
 }
 
 /** Rewrite `/zen/v1/chat/completions` -> `/zen/v1/responses`, query preserved. */
 export function toResponsesPath(url: string): string {
   const [path, ...rest] = url.split('?')
-  const rewritten = path.slice(0, -CHAT_COMPLETIONS_SUFFIX.length) + '/responses'
+  const stripped = path.replace(/\/+$/, '')
+  if (!stripped.endsWith(CHAT_COMPLETIONS_SUFFIX)) return url
+  const rewritten = stripped.slice(0, -CHAT_COMPLETIONS_SUFFIX.length) + '/responses'
   return rest.length ? `${rewritten}?${rest.join('?')}` : rewritten
 }
 
@@ -38,9 +40,15 @@ export function toResponsesRequestBody(body: Buffer): Buffer | null {
   const messages = parsed.messages
   if (!Array.isArray(messages)) return null
 
+  const input = toResponsesInput(messages)
+  // Null means a message part has no Responses equivalent (e.g. an
+  // image_url or other non-text content part we cannot translate). Fail open
+  // so the caller forwards the request natively instead of sending a
+  // mistranslated body that the upstream would 400.
+  if (!input) return null
   const translated: Record<string, unknown> = {
     model: parsed.model,
-    input: toResponsesInput(messages),
+    input,
   }
   // The Responses API names the output budget differently. Both are passed
   // through verbatim: a caller's budget is the caller's choice, even though
@@ -48,9 +56,14 @@ export function toResponsesRequestBody(body: Buffer): Buffer | null {
   if (parsed.max_tokens != null) translated.max_output_tokens = parsed.max_tokens
   if (parsed.max_completion_tokens != null) translated.max_output_tokens = parsed.max_completion_tokens
   if (parsed.max_output_tokens != null) translated.max_output_tokens = parsed.max_output_tokens
-  for (const key of ['temperature', 'top_p', 'stream', 'metadata']) {
+  for (const key of ['temperature', 'top_p', 'stream', 'metadata', 'parallel_tool_calls']) {
     if (parsed[key] !== undefined) translated[key] = parsed[key]
   }
+  // Intentionally not forwarded: stop, seed, frequency_penalty,
+  // presence_penalty, logit_bias, logprobs/top_logprobs, n, user, store and
+  // service_tier have no Responses API equivalent, and forwarding unknown
+  // fields risks an upstream 400. Translated requests therefore behave as the
+  // defaults for those parameters.
   // chat/completions object-form tool_choice nests the name under `function`,
   // the same shape the tools array uses just below; the Responses API flattens
   // it onto the choice. String forms mean the same in both APIs and pass
@@ -106,13 +119,17 @@ export function toResponsesRequestBody(body: Buffer): Buffer | null {
 /**
  * chat/completions `messages` -> Responses `input`.
  *
- * Plain messages pass through unchanged. The two that cannot are an assistant
- * turn carrying `tool_calls` and a `role: "tool"` result: the Responses API
- * models those as standalone `function_call` / `function_call_output` items
- * rather than as message fields, so a conversation replayed without this
- * translation loses every tool exchange.
+ * Plain messages pass through with their text/image content translated (see
+ * toResponsesContent). The two shapes that cannot pass through are an
+ * assistant turn carrying `tool_calls` and a `role: "tool"` result: the
+ * Responses API models those as standalone `function_call` /
+ * `function_call_output` items rather than as message fields, so a
+ * conversation replayed without this translation loses every tool exchange.
+ *
+ * Returns null when any message part has no Responses equivalent, so the
+ * caller can fail open and forward the request natively.
  */
-function toResponsesInput(messages: unknown[]): unknown[] {
+function toResponsesInput(messages: unknown[]): unknown[] | null {
   const input: unknown[] = []
   for (const message of messages) {
     if (!message || typeof message !== 'object') {
@@ -122,18 +139,21 @@ function toResponsesInput(messages: unknown[]): unknown[] {
     const record = message as Record<string, unknown>
 
     if (record.role === 'tool') {
+      const content = record.content
       input.push({
         type: 'function_call_output',
         call_id: record.tool_call_id,
-        output: typeof record.content === 'string' ? record.content : JSON.stringify(record.content ?? ''),
+        output: typeof content === 'string' ? content : JSON.stringify(content ?? ''),
       })
       continue
     }
 
     const toolCalls = record.tool_calls
-    if (record.role === 'assistant' && Array.isArray(toolCalls)) {
+    if (record.role === 'assistant' && Array.isArray(toolCalls) && toolCalls.length > 0) {
       if (record.content) {
-        input.push({ role: 'assistant', content: record.content })
+        const content = toResponsesContent(record.content)
+        if (content === null) return null
+        input.push({ role: 'assistant', content })
       }
       for (const call of toolCalls) {
         if (!call || typeof call !== 'object') continue
@@ -149,9 +169,47 @@ function toResponsesInput(messages: unknown[]): unknown[] {
       continue
     }
 
+    if (typeof record.content !== 'string' && record.content !== undefined && record.content !== null) {
+      const content = toResponsesContent(record.content)
+      if (content === null) return null
+      input.push({ ...record, content })
+      continue
+    }
+
     input.push(record)
   }
   return input
+}
+
+/**
+ * chat `content` (string or parts array) -> Responses `content`.
+ * Returns null for parts with no Responses equivalent.
+ */
+function toResponsesContent(content: unknown): unknown {
+  if (typeof content === 'string' || content == null) return content
+  if (!Array.isArray(content)) return null
+  const out: unknown[] = []
+  for (const part of content) {
+    if (!part || typeof part !== 'object') continue
+    const p = part as Record<string, unknown>
+    if (p.type === 'text' && typeof p.text === 'string') {
+      out.push({ type: 'input_text', text: p.text })
+    } else if (p.type === 'input_text' || p.type === 'input_image') {
+      out.push(part)
+    } else if (p.type === 'image_url') {
+      const raw = p.image_url
+      const url = typeof raw === 'string' ? raw : (raw as Record<string, unknown> | undefined)?.url
+      if (typeof url !== 'string') return null
+      const image: Record<string, unknown> = { type: 'input_image', image_url: url }
+      if (typeof (raw as Record<string, unknown> | undefined)?.detail === 'string') {
+        image.detail = (raw as Record<string, unknown>).detail
+      }
+      out.push(image)
+    } else {
+      return null
+    }
+  }
+  return out
 }
 
 function collectText(output: unknown): string {
@@ -164,9 +222,12 @@ function collectText(output: unknown): string {
     const content = record.content
     if (!Array.isArray(content)) continue
     for (const part of content) {
-      if (part && typeof part === 'object' && (part as Record<string, unknown>).type === 'output_text') {
-        const value = (part as Record<string, unknown>).text
-        if (typeof value === 'string') text += value
+      if (!part || typeof part !== 'object') continue
+      const p = part as Record<string, unknown>
+      if (p.type === 'output_text' && typeof p.text === 'string') {
+        text += p.text
+      } else if (p.type === 'refusal' && typeof p.refusal === 'string') {
+        text += p.refusal
       }
     }
   }
@@ -193,14 +254,33 @@ function finishReason(status: unknown): string {
   return status === 'incomplete' ? 'length' : 'stop'
 }
 
+/** Stable key for matching a streaming tool call across added/delta/done events. */
+function toolCallKey(outputIndex: unknown, item: Record<string, unknown>): string | null {
+  if (typeof outputIndex === 'number') return `index:${outputIndex}`
+  for (const field of ['item_id', 'call_id', 'id']) {
+    const value = item[field]
+    if (typeof value === 'string' && value) return `${field}:${value}`
+  }
+  return null
+}
+
 function mapUsage(usage: unknown): Record<string, unknown> | undefined {
   if (!usage || typeof usage !== 'object') return undefined
   const u = usage as Record<string, unknown>
-  return {
+  const mapped: Record<string, unknown> = {
     prompt_tokens: u.input_tokens ?? 0,
     completion_tokens: u.output_tokens ?? 0,
     total_tokens: u.total_tokens ?? 0,
   }
+  const inputDetails = u.input_tokens_details as Record<string, unknown> | undefined
+  if (inputDetails && typeof inputDetails.cached_tokens === 'number') {
+    mapped.prompt_tokens_details = { cached_tokens: inputDetails.cached_tokens }
+  }
+  const outputDetails = u.output_tokens_details as Record<string, unknown> | undefined
+  if (outputDetails && typeof outputDetails.reasoning_tokens === 'number') {
+    mapped.completion_tokens_details = { reasoning_tokens: outputDetails.reasoning_tokens }
+  }
+  return mapped
 }
 
 /** Non-streaming responses payload -> chat/completions payload. */
@@ -249,6 +329,11 @@ export class SseTranslator {
   private model = ''
   private roleSent = false
   private toolCallIndex = 0
+  // Incremental tool-call args keyed by the Responses output position (or item
+  // id when no index is present). A key is present once its opening frame has
+  // been emitted, so the terminal output_item.done can stay silent instead of
+  // re-emitting args the client already accumulated.
+  private readonly streamedToolCalls = new Map<string, number>()
   private readonly includeUsage: boolean
 
   // A chat/completions client sees usage only when it asked for it via
@@ -281,13 +366,19 @@ export class SseTranslator {
     }
 
     // A tool call arrives complete on output_item.done rather than as text
-    // deltas, so it is emitted as a single tool_calls frame. `index` must count
-    // tool calls only - numbering them by output position would leave gaps that
-    // clients accumulate into the wrong slot.
+    // deltas, so a model that sends no incremental args is emitted as a single
+    // tool_calls frame. `index` must count tool calls only - numbering them by
+    // output position would leave gaps that clients accumulate into the wrong
+    // slot. When incremental function_call_arguments.delta events were already
+    // streamed for this call, done stays silent so args are not duplicated.
     if (eventName === 'response.output_item.done') {
       const item = parsed.item as Record<string, unknown> | undefined
       if (!item || item.type !== 'function_call') return ''
+      const key = toolCallKey(parsed.output_index, item)
+      const known = key !== null ? this.streamedToolCalls.get(key) : undefined
+      if (known !== undefined) return ''
       const index = this.toolCallIndex++
+      if (key !== null) this.streamedToolCalls.set(key, index)
       return this.frame({
         tool_calls: [
           {
@@ -297,6 +388,39 @@ export class SseTranslator {
             function: { name: item.name, arguments: item.arguments ?? '{}' },
           },
         ],
+      }, null)
+    }
+
+    if (eventName === 'response.output_item.added') {
+      const item = parsed.item as Record<string, unknown> | undefined
+      if (!item || item.type !== 'function_call') return ''
+      const key = toolCallKey(parsed.output_index, item)
+      if (key !== null && this.streamedToolCalls.has(key)) return ''
+      const index = this.toolCallIndex++
+      if (key !== null) this.streamedToolCalls.set(key, index)
+      return this.frame({
+        tool_calls: [
+          {
+            index,
+            id: item.call_id ?? item.id,
+            type: 'function',
+            function: { name: item.name, arguments: '' },
+          },
+        ],
+      }, null)
+    }
+
+    if (eventName === 'response.function_call_arguments.delta') {
+      const delta = typeof parsed.delta === 'string' ? parsed.delta : ''
+      if (!delta) return ''
+      const key = toolCallKey(parsed.output_index, parsed as Record<string, unknown>)
+      let index = key !== null ? this.streamedToolCalls.get(key) : undefined
+      if (index === undefined) {
+        index = this.toolCallIndex++
+        if (key !== null) this.streamedToolCalls.set(key, index)
+      }
+      return this.frame({
+        tool_calls: [{ index, function: { arguments: delta } }],
       }, null)
     }
 
@@ -314,7 +438,7 @@ export class SseTranslator {
     }
 
     if (eventName === 'response.failed' || eventName === 'error') {
-      return `data: ${JSON.stringify({ error: parsed })}\n\ndata: [DONE]\n\n`
+      return `data: ${JSON.stringify({ error: (parsed.error ?? parsed) as unknown })}\n\ndata: [DONE]\n\n`
     }
 
     return ''

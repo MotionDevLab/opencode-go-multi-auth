@@ -129,8 +129,8 @@ export class ProxyServer {
     // Unknown models start native and are switched to /responses only when the
     // upstream proves their chat/completions route is dead; a model remembered
     // here is translated up front so it pays no second round trip.
-    let translateZenResponses = false
-    let includeUsage = false
+    let translateZenResponses: boolean = false
+    let includeUsage: boolean = false
     const headers = req.headers as Record<string, string | string[] | undefined>
     const body = await this.readBody(req)
     if (body === null) {
@@ -245,10 +245,18 @@ export class ProxyServer {
         // contributor models). Retry ONCE in translated form on the SAME key:
         // a protocol switch is not a key failure, so it must not consume a
         // key-failover attempt. The per-model memo makes this a one-time cost
-        // per model per process.
-        if (upstreamRes.status >= 500 && isZenChatCompletions && !translateZenResponses && requestModel && req.url) {
+        // per model per process. Only an exact 500 triggers this: 502/503/504
+        // are transient infra failures that fail over to the next key.
+        if (upstreamRes.status === 500 && isZenChatCompletions && !translateZenResponses && requestModel && req.url) {
           const translatedBody = toResponsesRequestBody(body)
           if (translatedBody) {
+            // Per-attempt snapshot: if the translated attempt also fails, the
+            // next key must start native again, not inherit the /responses URL.
+            const attemptUrl: string = req.url
+            const attemptBody: Buffer = requestBody
+            const attemptPrepared: RequestPreparation = prepared
+            const attemptTranslated: boolean = translateZenResponses
+            const attemptIncludeUsage: boolean = includeUsage
             requestBody = translatedBody
             req.url = toResponsesPath(req.url)
             translateZenResponses = true
@@ -282,12 +290,19 @@ export class ProxyServer {
               signal: upstreamAbortController.signal,
             })
             if (upstreamHungTimer) clearTimeout(upstreamHungTimer)
-            // Only a translated attempt that is not itself a 5xx proves the
-            // model needs the Responses endpoint. If it also 5xxes the failure
-            // is more likely the key, so the model stays unremembered and the
-            // next request starts native again.
-            if (translatedRes.status < 500) {
+            // Only a translated 2xx proves the model needs the Responses
+            // endpoint. A 4xx (translation bug, bad key, quota) or a further
+            // 5xx must not pin the model: the next request starts native
+            // again. On a 5xx the per-attempt state is restored so the next
+            // key is tried natively, not forced down the translated path.
+            if (translatedRes.ok) {
               this.zenResponsesModelMemo.set(requestModel, true)
+            } else if (translatedRes.status >= 500) {
+              req.url = attemptUrl
+              requestBody = attemptBody
+              prepared = attemptPrepared
+              translateZenResponses = attemptTranslated
+              includeUsage = attemptIncludeUsage
             }
             upstreamRes = translatedRes
             duration = Date.now() - startTime
@@ -393,8 +408,9 @@ export class ProxyServer {
           if (prepared.stream) {
             await this.pipeTranslatedZenStream(upstreamRes.body, res, includeUsage)
           } else {
-            const raw = await upstreamRes.clone().text().catch(() => '')
-            res.end(toChatCompletion(raw))
+            const translatedBody = await responseTextPromise
+            res.end(toChatCompletion(translatedBody))
+            responseTextPromise = Promise.resolve(translatedBody)
           }
         } else {
           res.writeHead(upstreamRes.status, responseHeaders)
