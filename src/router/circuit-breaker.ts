@@ -24,11 +24,11 @@ export class CircuitBreaker {
   private windowFailures: number
   private windowMs: number
 
-  constructor(threshold = 3, recoveryMs = 300_000, windowFailures = 8, windowSeconds = 180) {
-    this.threshold = clampInt(threshold, FAILOVER_TUNING_RANGES.circuitBreakerThreshold.min, FAILOVER_TUNING_RANGES.circuitBreakerThreshold.max, 3)
-    this.recoveryMs = clampInt(recoveryMs, FAILOVER_TUNING_RANGES.circuitBreakerRecoveryMs.min, FAILOVER_TUNING_RANGES.circuitBreakerRecoveryMs.max, 300_000)
-    this.windowFailures = clampInt(windowFailures, FAILOVER_TUNING_RANGES.windowFailures.min, FAILOVER_TUNING_RANGES.windowFailures.max, 8)
-    this.windowMs = clampInt(windowSeconds, FAILOVER_TUNING_RANGES.windowSeconds.min, FAILOVER_TUNING_RANGES.windowSeconds.max, 180) * 1000
+  constructor(threshold = 6, recoveryMs = 120_000, windowFailures = 12, windowSeconds = 300) {
+    this.threshold = clampInt(threshold, FAILOVER_TUNING_RANGES.circuitBreakerThreshold.min, FAILOVER_TUNING_RANGES.circuitBreakerThreshold.max, 6)
+    this.recoveryMs = clampInt(recoveryMs, FAILOVER_TUNING_RANGES.circuitBreakerRecoveryMs.min, FAILOVER_TUNING_RANGES.circuitBreakerRecoveryMs.max, 120_000)
+    this.windowFailures = clampInt(windowFailures, FAILOVER_TUNING_RANGES.windowFailures.min, FAILOVER_TUNING_RANGES.windowFailures.max, 12)
+    this.windowMs = clampInt(windowSeconds, FAILOVER_TUNING_RANGES.windowSeconds.min, FAILOVER_TUNING_RANGES.windowSeconds.max, 300) * 1000
   }
 
   setThreshold(value: number): void {
