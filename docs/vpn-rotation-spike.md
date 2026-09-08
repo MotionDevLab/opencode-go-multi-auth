@@ -30,57 +30,73 @@ router (or an operator script) can trigger without touching samosa logic —
 - **Cloudflare WARP**: service `WarpJITSvc` present but `warp-cli.exe` not found
   at the standard path — install state unverified, treat as lead not fact.
 
-## Verdict: paid Vypr usable, but NOT scriptable from local artifacts
+## Update 2026-09-08: official manual connections found — portal check unnecessary
 
-Peer `PublicKey`/`PresharedKey` are per-server and provisioned at connect time
-via the authenticated Locations API. Hostnames are guessable, keys are not —
-so a hand-rolled `wireguard.exe` + `.conf`-per-server setup is **blocked on key
-material**, not on tooling. Paths, ranked:
+VyprVPN publishes **manual setup for the Windows built-in client** (support docs,
+still current — no portal download needed):
 
-1. **Vypr portal manual configs (decisive 5-min user check).** If the account
-   offers `.ovpn`/WireGuard downloads, rotation = stock `openvpn.exe` or
-   `wireguard.exe` + profile swap, fully scriptable, paid-IP quality kept.
-   Log in → look for manual setup / config download.
-2. **Authenticated Locations API reuse (reverse-engineering, fragile).**
-   The app already calls it with the paid account's token; sniffing +
-   replaying it outside the app breaks ToS-adjacent ground and breaks on app
-   updates. Not recommended without explicit need.
-3. **GUI automation of VyprVPN.exe** (last resort). Works today (6–13s
-   connects) but breaks on every redesign; UIA/AutoHotkey driving the server
-   list.
-4. **`oplire watch` / WARP** (non-Vypr fallbacks, unchanged from before).
+- **IKEv2 (preferred, fastest reconnects)**: `Settings → Network → VPN → Add VPN`
+  with `Server name = xxN.vyprvpn.com`, `VPN type = IKEv2`,
+  sign-in = Vypr **email + password**. Full public server list (70+ locations;
+  nearby: `lt1`, `lv1`, `cz1`, `de1`, `pl1`).
+- **L2TP/IPsec fallback**: same credentials + public pre-shared key
+  `thisisourkey` + max-strength encryption.
 
-## Ranked options
+No static IPs exist or are needed: the 300k-address dynamic pool is the ideal
+rotation shape — every reconnect lands a fresh egress IP.
 
-1. **Manual OpenVPN configs from Vypr account portal** (best if available).
-   If the subscription allows `.ovpn` profile downloads, rotation = stock
-   `openvpn.exe --config hop.ovpn` managed by a script/Task Scheduler. Zero GUI,
-   deterministic, keeps paid-VPN IP quality (better than shared WARP pool).
-   **Next step**: log in to the Vypr portal → look for manual setup / config
-   download. If absent, this path is dead (Vypr restricted manual configs before).
-2. **GUI automation of VyprVPN.exe** (fragile fallback). Drive server switch via
-   AutoHotkey/UIA or `ServiceManager.exe` (behavior unknown — probe with
-   `/help`/`-h` strings first). Breaks on every app redesign; last resort.
-3. **`oplire watch`** (packaged auto-reset). `winget install BerkeOruc.oplire`;
-   verifies in 15 min whether it forwards real Zen keys + `/responses`. If yes:
-   chain samosa behind it. If no: DeepSeek/Mimo-only, useless for Spark.
-4. **Cloudflare WARP vendor path**. Confirm whether WARP is actually installed
-   (`warp-cli` on PATH?); shared exit IPs may arrive pre-burned — strictly
-   worse IP quality than Vypr, but fully scriptable (`registration delete →
-   new → connect`, verify `new_ip != old`).
+### Why this obsoletes the other paths
 
-## Decision needed from operator
+- **Locations API reuse**: unnecessary. Official credentials + hostnames beat
+  reverse-engineering (no breakage risk, no ToS gray area). Kept as
+  last-resort only.
+- **Public scraping proxies (rejected outright, do not revisit)**:
+  1. Key theft — Zen keys ride in `Authorization` headers through the proxy.
+  2. Pre-burned — free proxy IPs are datacenter ranges, the worst class for
+     per-IP limits. 3. SSE-hostile — flaky high-latency hops truncate 200K
+     turns → more retries → more burst. Never route keyed traffic through
+     untrusted middlemen.
 
-- Does the Vypr portal offer manual `.ovpn`/WireGuard configs? (5-minute check,
-  decides between options 1 and 2–4.)
-- If yes: follow-up build = `scripts/vpn-hop.ps1` (disconnect → swap profile →
-  reconnect → verify via `api.ipify.org` → optional ntfy ping) + Task Scheduler
-  or dashboard-button trigger. Samosa needs zero changes.
+## Detailed plan: scripted rotation via Windows native VPN
+
+**Safety**: a native VPN profile lives in the Windows RAS phonebook + a
+WAN Miniport adapter instance. It does not modify, remove, or reconfigure the
+Vypr desktop app, its services, drivers, or configs. Rollback =
+`Remove-VpnConnection`. **One tunnel at a time**: never run the Vypr app
+connection and a native `rasdial` simultaneously (two default routes = stall;
+recovery = disconnect either side). Credentials → Credential Manager, never
+inline on the command line. Kill Switch caveat: if system-level, it can block
+the native tunnel too — disable it for tests, re-enable after.
+
+**Phase 1 — single manual connection, interactive (15 min):**
+
+1. Disconnect/quit the Vypr desktop app.
+2. `Add-VpnConnection -Name 'VyprVPN-lv1' -ServerAddress 'lv1.vyprvpn.com' -TunnelType Ikev2 -AuthenticationMethod Eap -RememberCredential`
+   (credentials = Vypr email/password via prompt).
+3. `rasdial VyprVPN-lv1` → `curl.exe https://api.ipify.org` (expect new IP) →
+   one `(proxy)` turn → 200 on tape → `rasdial /disconnect` → reconnect app.
+4. Failure branches: auth rejected → try username-form variants, then L2TP
+   profile; connect hangs → suspect Kill Switch, disable and retry.
+
+**Phase 2 — `scripts/vpn-hop.ps1` (in this repo):**
+
+Loop over curated nearby servers (`lt1`, `lv1`, `cz1`, `de1`, `pl1`):
+disconnect → `rasdial` next → verify `api.ipify.org` changed → optional ntfy
+ping. Trigger: manual, Task Scheduler cadence, or dashboard button on the
+tarpit signature (two consecutive multi-second 429s). Samosa needs zero
+changes — `localhost:18905` follows the OS default route.
+
+**Phase 3 — lane split (complementary, no new account):**
+
+Vypr per-app exclusion ("Connection Per App"): keep `node.exe` (router daemon)
+inside the tunnel, exclude the OpenCode desktop app so direct traffic
+(main #1, `small_model`, direct `zen-2`) exits via the ISP IP. Two simultaneous
+egress IPs: proxy pool (long sessions) on VPN IP, native lane (short/mid tasks)
+on ISP IP. Validate: staggered burst onset between lanes.
 
 ## Constraints (unchanged)
 
 - Rotation is an **egress-layer** concern; the router stays key-layer. No proxy
   code changes for any option above (worst case: a dashboard button that shells
   the hop script).
-- `node.exe`/OpenCode must stay inside the tunnel (Vypr Per-App settings);
-  Kill Switch will fail in-flight requests during a hop — retry after reconnect.
+- Kill Switch fails in-flight requests during a hop — retry after reconnect.

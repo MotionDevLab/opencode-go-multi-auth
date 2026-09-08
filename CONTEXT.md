@@ -68,6 +68,14 @@ without traffic; re-trips re-arm it.
 ## 7. Roadmap
 
 - **Next big update**: egress IP rotation for the per-IP burst bucket (see
-  `docs/vpn-rotation-spike.md`). Keys cover quota; only new egress IP clears burst.
+  `docs/vpn-rotation-spike.md`). Decided 2026-09-08: Vypr **manual Windows
+  native connections** (IKEv2/L2TP, official support docs, email+password,
+  public `xxN.vyprvpn.com` hostnames) — scriptable via
+  `Add-VpnConnection`/`rasdial`, no static IPs needed (300k dynamic pool),
+  no portal download needed. Native profile is independent of the Vypr
+  desktop app (separate RAS phonebook; one tunnel at a time). Phases:
+  single-connection proof → `scripts/vpn-hop.ps1` → lane split (proxy in
+  tunnel, OpenCode app excluded via Per-App = ISP IP for native lane).
+  Rejected: public scraping proxies (key theft + pre-burned + SSE-hostile).
 - Deferred: rolling 10-min error rate, burst-vs-quota split counter,
   self-adapting thresholds, transport-error breaker counting.
