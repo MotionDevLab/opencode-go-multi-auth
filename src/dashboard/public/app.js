@@ -1259,14 +1259,14 @@ async function renderFailoverTuning() {
           </div>
         </div>
         <div class="ft-group ft-group-counts">
-          <div class="ft-group-label">What counts — same colors as the Logs page</div>
+          <div class="ft-group-label">Failure modes — what each response does to a key</div>
           <div class="ft-legend">
-            <span class="chip chip-green">2xx resets streak</span>
-            <span class="chip chip-red">5xx feeds breaker</span>
-            <span class="chip chip-yellow">burst-429 feeds breaker</span>
-            <span class="chip chip-yellow">quota-429 → cooldown + failover</span>
-            <span class="chip chip-muted">other 4xx count-only</span>
-            <span class="chip chip-muted">transport errors never trip</span>
+            <span class="chip chip-green" title="Success. Zeroes the consecutive-failure streak. The window ring keeps older failures, so a single 200 does not erase a slow-burn pattern.">2xx resets streak</span>
+            <span class="chip chip-red" title="Server-side failure. Always feeds the breaker (streak + window). An exact 500 on Zen chat also triggers one translated retry via /responses on the same key.">5xx feeds breaker</span>
+            <span class="chip chip-yellow" title="Burst rate limit (no quota markers). Returned to the client verbatim — no same-request key-burning — but counts toward the breaker when Burst-failover is on, so the NEXT request spills.">burst-429 feeds breaker</span>
+            <span class="chip chip-yellow" title="Quota exhaustion (402, or 429 with quota markers). Parks the key in cooldown for the upstream-supplied wait and fails over to the next key within the SAME request.">quota-429 → cooldown + failover</span>
+            <span class="chip chip-muted" title="400/403/404 and similar (dashboard probes included). Counted in REQ/ERR for honest stats, but say nothing about key health — they neither feed nor reset the breaker.">other 4xx count-only</span>
+            <span class="chip chip-muted" title="Fetch threw or the client disconnected (statusCode 0). Counted as an error, but never trips — a cancelled turn must not exile a healthy key.">transport errors never trip</span>
           </div>
           <div style="display: flex; gap: 16px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
             <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Count burst-429s toward the breaker so the NEXT request fails over. Off = pre-tuning behavior: 429s never trip, keys cook.">

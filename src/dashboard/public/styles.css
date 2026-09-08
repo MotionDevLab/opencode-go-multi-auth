@@ -983,6 +983,10 @@ input, select, textarea {
   flex-wrap: wrap;
 }
 
+.ft-legend .chip {
+  cursor: help;
+}
+
 .account-replace-popover {
   position: absolute;
   z-index: 30;
