@@ -858,7 +858,7 @@ function renderAccountCard(key) {
   const breakerProgress = tuning
     ? `<span><span class="label">Brk</span><strong>${key.consecutiveErrors ?? 0}/${tuning.circuitBreakerThreshold} · win ${key.windowFailureCount ?? 0}/${tuning.windowFailures}</strong></span>`
     : '';
-  const hint = (key.requestCount || 0) >= 10 && errorRate >= 25
+  const hint = (key.requestCount || 0) >= 30 && errorRate >= 30
     ? `<div class="account-hint">⚠ ${escapeHtml(key.alias)} at ${errorRate.toFixed(0)}% errors — consider Rest 12h or Break stickiness.</div>`
     : '';
 
