@@ -153,6 +153,11 @@ export class QuotaTracker {
     }))
   }
 
+  clearKey(keyId: string): void {
+    this.store.delete(keyId)
+    this.onChange?.()
+  }
+
   private emptyEntry(keyId: string): QuotaEntry {
     return { keyId, tokensInput: 0, tokensOutput: 0, tokensCacheRead: 0, tokensCacheWrite: 0, tokensReasoning: 0, costAccumulated: 0, costObservedCount: 0, usageLog: [] }
   }

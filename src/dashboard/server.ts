@@ -233,6 +233,19 @@ export class DashboardServer {
       res.json(this.serializeKey(key))
     }))
 
+    this.app.post('/api/keys/:id/reset-stats', wrap(async (req, res) => {
+      const key = this.keyManager.getKeyById(req.params.id)
+      if (!key) {
+        res.status(404).json({ error: 'Key not found' })
+        return
+      }
+
+      this.keyManager.resetStats(req.params.id)
+      this.circuitBreaker.reset(req.params.id)
+      this.quotaTracker.clearKey(req.params.id)
+      res.json(this.serializeKey(key))
+    }))
+
     this.app.post('/api/sessions/clear', wrap(async (_req, res) => {
       this.proxyServer?.clearSessionAffinity()
       res.json({ success: true })

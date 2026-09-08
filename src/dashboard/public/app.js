@@ -114,6 +114,7 @@ const api = {
   resetCooldown(id) { return this.req(`/api/keys/${id}/reset-cooldown`, { method: 'POST' }); },
   restKey(id) { return this.req(`/api/keys/${id}/rest`, { method: 'POST' }); },
   resetBreaker(id) { return this.req(`/api/keys/${id}/reset-breaker`, { method: 'POST' }); },
+  resetStats(id) { return this.req(`/api/keys/${id}/reset-stats`, { method: 'POST' }); },
   clearSessions() { return this.req('/api/sessions/clear', { method: 'POST' }); },
   failoverTuning() { return this.req('/api/failover-tuning'); },
   setFailoverTuning(payload) { return this.req('/api/failover-tuning', { method: 'PUT', body: payload }); },
@@ -918,6 +919,7 @@ function renderAccountCard(key) {
           <button class="btn btn-sm" data-action="reset" data-id="${key.id}">Reset cooldown</button>
           <button class="btn btn-sm" data-action="rest" data-id="${key.id}" title="Park this key in cooldown for 12h (manual relief, no quota signal needed).">Rest 12h</button>
           <button class="btn btn-sm" data-action="reset-breaker" data-id="${key.id}" title="Force the circuit breaker CLOSED and zero its failure counters.">Reset breaker</button>
+          <button class="btn btn-sm" data-action="reset-stats" data-id="${key.id}" title="Zero REQ/ERR/LAT counters and quota totals for this key (display counters only; also clears breaker and quota window).">Reset stats</button>
           <button class="btn btn-sm" data-action="test" data-id="${key.id}">Test</button>
           <div class="toggle ${key.enabled ? 'on' : ''}" data-action="toggle" data-id="${key.id}" role="switch" aria-checked="${key.enabled}"></div>
           <button class="btn btn-sm btn-danger" data-action="remove" data-id="${key.id}">Remove</button>
@@ -969,6 +971,16 @@ function initAccountCardHandlers(host) {
   $$('button[data-action="reset-breaker"]', host).forEach((el) => {
     el.addEventListener('click', async () => {
       try { await api.resetBreaker(el.dataset.id); toast('Breaker reset', 'success'); await refreshKeys(); }
+      catch (err) { toast(err.message, 'error'); }
+    });
+  });
+
+  // Reset stats — zero display counters + breaker + quota window
+  $$('button[data-action="reset-stats"]', host).forEach((el) => {
+    el.addEventListener('click', async () => {
+      const key = state.keys.find((k) => k.id === el.dataset.id);
+      if (!confirm(`Reset all counters for "${key ? key.alias : el.dataset.id}"? REQ/ERR, latency, tokens and quota window go to 0 and the breaker is also cleared.`)) return;
+      try { await api.resetStats(el.dataset.id); toast('Stats reset', 'success'); await refreshKeys(); }
       catch (err) { toast(err.message, 'error'); }
     });
   });

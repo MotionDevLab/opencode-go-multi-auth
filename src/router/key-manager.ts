@@ -218,6 +218,21 @@ export class KeyManager {
     this.onChange?.()
   }
 
+  resetStats(id: string): void {
+    const key = this.getKeyById(id)
+    if (!key) return
+    key.requestCount = 0
+    key.successCount = 0
+    key.errorCount = 0
+    key.averageLatencyMs = 0
+    key.consecutiveErrors = 0
+    key.lastUsedAt = null
+    key.lastStatusCode = null
+    key.lastModel = null
+    key.lastSessionId = null
+    this.onChange?.()
+  }
+
   setEnabled(id: string, enabled: boolean): ApiKey | null {
     const key = this.getKeyById(id)
     if (!key) return null
