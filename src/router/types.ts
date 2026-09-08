@@ -78,6 +78,7 @@ export interface RouterConfig {
   cooldownMs: number
   circuitBreakerThreshold: number
   circuitBreakerRecoveryMs: number
+  breakerSelfCancelMs: number
   burstFailoverEnabled: boolean
   honorRetryAfter: boolean
   retryAfterCapMs: number
@@ -154,6 +155,7 @@ export const DEFAULT_CONFIG: RouterConfig = {
   cooldownMs: 5 * 60 * 60 * 1000,
   circuitBreakerThreshold: 6,
   circuitBreakerRecoveryMs: 120_000,
+  breakerSelfCancelMs: 0,
   burstFailoverEnabled: true,
   honorRetryAfter: true,
   retryAfterCapMs: 300_000,
@@ -179,6 +181,7 @@ export enum CircuitState {
 export interface FailoverTuning {
   circuitBreakerThreshold: number
   circuitBreakerRecoveryMs: number
+  breakerSelfCancelMs: number
   burstFailoverEnabled: boolean
   honorRetryAfter: boolean
   retryAfterCapMs: number
@@ -189,6 +192,7 @@ export interface FailoverTuning {
 export const FAILOVER_TUNING_RANGES = {
   circuitBreakerThreshold: { min: 2, max: 10 },
   circuitBreakerRecoveryMs: { min: 60_000, max: 900_000 },
+  breakerSelfCancelMs: { min: 0, max: 900_000 },
   retryAfterCapMs: { min: 60_000, max: 3_600_000 },
   windowFailures: { min: 3, max: 20 },
   windowSeconds: { min: 60, max: 600 },
@@ -207,6 +211,14 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
     const problem = checkIntRange(name, v[name], range.min, range.max)
     if (problem) return { ok: false, error: problem }
   }
+  // breakerSelfCancelMs: 0 = follow Recovery; otherwise 30s–15min.
+  const selfCancel = v.breakerSelfCancelMs
+  if (typeof selfCancel !== 'number' || !Number.isInteger(selfCancel)) {
+    return { ok: false, error: 'breakerSelfCancelMs must be an integer' }
+  }
+  if (selfCancel !== 0 && (selfCancel < 30_000 || selfCancel > 900_000)) {
+    return { ok: false, error: 'breakerSelfCancelMs must be 0 or between 30000 and 900000' }
+  }
   for (const name of ['burstFailoverEnabled', 'honorRetryAfter']) {
     if (typeof v[name] !== 'boolean') return { ok: false, error: `${name} must be a boolean` }
   }
@@ -215,6 +227,7 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
     value: {
       circuitBreakerThreshold: v.circuitBreakerThreshold as number,
       circuitBreakerRecoveryMs: v.circuitBreakerRecoveryMs as number,
+      breakerSelfCancelMs: selfCancel,
       burstFailoverEnabled: v.burstFailoverEnabled as boolean,
       honorRetryAfter: v.honorRetryAfter as boolean,
       retryAfterCapMs: v.retryAfterCapMs as number,
@@ -228,6 +241,7 @@ export function tuningFromConfig(config: RouterConfig): FailoverTuning {
   return {
     circuitBreakerThreshold: config.circuitBreakerThreshold,
     circuitBreakerRecoveryMs: config.circuitBreakerRecoveryMs,
+    breakerSelfCancelMs: config.breakerSelfCancelMs,
     burstFailoverEnabled: config.burstFailoverEnabled,
     honorRetryAfter: config.honorRetryAfter,
     retryAfterCapMs: config.retryAfterCapMs,

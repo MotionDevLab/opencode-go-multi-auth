@@ -54,6 +54,7 @@ function loadEnvConfig(): Partial<RouterConfig> {
     cooldownMs: Number(process.env.COOLDOWN_MS) || DEFAULT_CONFIG.cooldownMs,
     circuitBreakerThreshold: Number(process.env.CIRCUIT_BREAKER_THRESHOLD) || DEFAULT_CONFIG.circuitBreakerThreshold,
     circuitBreakerRecoveryMs: Number(process.env.CIRCUIT_BREAKER_RECOVERY_MS) || DEFAULT_CONFIG.circuitBreakerRecoveryMs,
+    breakerSelfCancelMs: Number(process.env.BREAKER_SELF_CANCEL_MS) || DEFAULT_CONFIG.breakerSelfCancelMs,
     burstFailoverEnabled: readBoolean(process.env.BURST_FAILOVER_ENABLED, DEFAULT_CONFIG.burstFailoverEnabled),
     honorRetryAfter: readBoolean(process.env.HONOR_RETRY_AFTER, DEFAULT_CONFIG.honorRetryAfter),
     retryAfterCapMs: Number(process.env.RETRY_AFTER_CAP_MS) || DEFAULT_CONFIG.retryAfterCapMs,
@@ -109,7 +110,15 @@ export async function createRouter(
     mergedConfig.circuitBreakerRecoveryMs,
     mergedConfig.windowFailures,
     mergedConfig.windowSeconds,
+    mergedConfig.breakerSelfCancelMs,
   )
+  circuitBreaker.setOnSelfCancel((keyId) => {
+    const key = keyManager.getKeyById(keyId)
+    logStream.emit(logger, 'warn', `Circuit breaker self-cancelled for key "${key?.alias ?? keyId}" (half-open, probing)`, {
+      keyAlias: key?.alias ?? keyId,
+      keyId,
+    })
+  })
   quotaTracker = new QuotaTracker(2000, persistRuntimeState)
 
   const storedKeys = await secureStore.loadKeys()

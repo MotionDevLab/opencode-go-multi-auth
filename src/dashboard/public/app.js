@@ -845,11 +845,15 @@ function renderAccountCard(key) {
     ? `<div class="account-quota-line">Last quota error: <strong>HTTP ${lastQuotaError.statusCode}</strong> ${escapeHtml(lastQuotaError.message || '')}${lastQuotaError.resetAt ? ` · retry ${fmtDateTime(new Date(lastQuotaError.resetAt).toISOString())}` : ''}</div>`
     : '';
 
-  const circuitChip = key.health === 'open'
-    ? '<span class="chip chip-red" title="Circuit breaker OPEN — this key is temporarily skipped due to consecutive failures (5xx or burst 429s).">⏻ open</span>'
-    : key.health === 'half_open'
-      ? '<span class="chip chip-yellow" title="Circuit breaker HALF-OPEN — probing if key has recovered.">◐ half-open</span>'
-      : '';
+  let circuitChip = '';
+  if (key.health === 'open') {
+    const msLeft = typeof key.breakerSelfCancelAt === 'number' ? key.breakerSelfCancelAt - Date.now() : null;
+    const countdown = msLeft !== null && msLeft > 0 ? ` · self-cancel in ~${Math.ceil(msLeft / 1000)}s` : ' · self-cancelling';
+    const tripAt = typeof key.breakerTrippedAt === 'number' ? ` Tripped ${new Date(key.breakerTrippedAt).toLocaleTimeString()}.` : '';
+    circuitChip = `<span class="chip chip-red" title="Circuit breaker OPEN — this key is skipped; traffic fails over.${tripAt} It releases to half-open automatically, no traffic needed.">⏻ open${escapeHtml(countdown)}</span>`;
+  } else if (key.health === 'half_open') {
+    circuitChip = '<span class="chip chip-yellow" title="Circuit breaker HALF-OPEN — the next request probes this key: success closes the breaker, failure re-trips it.">◐ half-open</span>';
+  }
 
   const errorRate = key.requestCount > 0 ? ((key.errorCount / key.requestCount) * 100) : 0;
   const errRateColor = errorRate < 5 ? 'var(--green)' : errorRate < 20 ? 'var(--yellow)' : 'var(--red)';
@@ -1227,23 +1231,30 @@ async function renderFailoverTuning() {
         <span class="panel-meta">Live-applied, no restart needed</span>
       </div>
       <div class="card-body">
-        <p style="margin: 0 0 12px; color: var(--text-secondary); font-size: 13px;">
+        <p style="margin: 0 0 4px; color: var(--text-secondary); font-size: 13px;">
           A key trips its breaker on <strong>${escapeHtml(String(t.circuitBreakerThreshold))} consecutive failures</strong>
           or <strong>${escapeHtml(String(t.windowFailures))} failures within ${escapeHtml(String(t.windowSeconds))}s</strong> —
-          whichever comes first. Tripped keys are skipped until recovery, so the next request fails over to a cool account.
+          whichever comes first. Only 5xx and burst-429s count; single 200s reset the streak but not the window.
         </p>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
-          <label>Streak trip (2–10)<input class="input" type="number" min="2" max="10" id="ft-threshold" value="${t.circuitBreakerThreshold}"></label>
-          <label>Recovery (60–900s)<input class="input" type="number" min="60" max="900" id="ft-recovery" value="${Math.round(t.circuitBreakerRecoveryMs / 1000)}"></label>
+        <p style="margin: 0 0 12px; color: var(--text-secondary); font-size: 13px;">
+          Tripped keys are skipped, so the next request fails over to a cool account. A tripped key then
+          <strong>self-cancels to half-open</strong> after the timeout below — no traffic needed — and the next
+          request probes it: success closes the breaker, failure re-trips it. Tuning changes apply live to future
+          trips; an already-open key keeps the timeout it tripped with.
+        </p>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;">
+          <label>Streak trip (2–10)<input class="input" type="number" min="2" max="10" id="ft-threshold" value="${t.circuitBreakerThreshold}"><small style="color: var(--text-faint); font-size: 11px;">Unbroken failure run that trips. Lower = faster spill, more false trips on flapping bursts.</small></label>
+          <label>Recovery (60–900s)<input class="input" type="number" min="60" max="900" id="ft-recovery" value="${Math.round(t.circuitBreakerRecoveryMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Fallback exile length when nothing else sets one. Keep above ~60s so probes don't fire into the same Retry-After window.</small></label>
+          <label>Self-cancel (0 or 30–900s)<input class="input" type="number" min="0" max="900" id="ft-self-cancel" value="${Math.round((t.breakerSelfCancelMs || 0) / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Proactive OPEN → half-open timer, fires without traffic. 0 = follow Recovery. Upstream Retry-After overrides both when honored.</small></label>
           <label>Window fails (3–20)<input class="input" type="number" min="3" max="20" id="ft-window-fails" value="${t.windowFailures}"></label>
-          <label>Window (60–600s)<input class="input" type="number" min="60" max="600" id="ft-window-secs" value="${t.windowSeconds}"></label>
-          <label>Retry-After cap (60–3600s)<input class="input" type="number" min="60" max="3600" id="ft-cap" value="${Math.round(t.retryAfterCapMs / 1000)}"></label>
+          <label>Window (60–600s)<input class="input" type="number" min="60" max="600" id="ft-window-secs" value="${t.windowSeconds}"><small style="color: var(--text-faint); font-size: 11px;">Slow-burn trip: N failures inside M seconds, even with 200s between them. Catches degrading keys the streak rule misses.</small></label>
+          <label>Retry-After cap (60–3600s)<input class="input" type="number" min="60" max="3600" id="ft-cap" value="${Math.round(t.retryAfterCapMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Upper bound for upstream-supplied waits. Caps one Retry-After header from exiling a key for hours.</small></label>
         </div>
         <div style="display: flex; gap: 16px; margin-top: 12px; align-items: center; flex-wrap: wrap;">
-          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;">
+          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Count burst-429s toward the breaker so the NEXT request fails over. Off = pre-tuning behavior: 429s never trip, keys cook.">
             <input type="checkbox" id="ft-burst" ${t.burstFailoverEnabled ? 'checked' : ''}> Burst-failover
           </label>
-          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;">
+          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header (clamped between Recovery and the cap) as the exile length instead of the flat Recovery value.">
             <input type="checkbox" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
           </label>
           <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
@@ -1256,6 +1267,7 @@ async function renderFailoverTuning() {
     const payload = {
       circuitBreakerThreshold: num('#ft-threshold'),
       circuitBreakerRecoveryMs: num('#ft-recovery') * 1000,
+      breakerSelfCancelMs: num('#ft-self-cancel') * 1000,
       windowFailures: num('#ft-window-fails'),
       windowSeconds: num('#ft-window-secs'),
       retryAfterCapMs: num('#ft-cap') * 1000,

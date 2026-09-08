@@ -264,6 +264,7 @@ export class DashboardServer {
       const tuning = parsed.value
       this.configStore.set('circuitBreakerThreshold', tuning.circuitBreakerThreshold)
       this.configStore.set('circuitBreakerRecoveryMs', tuning.circuitBreakerRecoveryMs)
+      this.configStore.set('breakerSelfCancelMs', tuning.breakerSelfCancelMs)
       this.configStore.set('burstFailoverEnabled', tuning.burstFailoverEnabled)
       this.configStore.set('honorRetryAfter', tuning.honorRetryAfter)
       this.configStore.set('retryAfterCapMs', tuning.retryAfterCapMs)
@@ -271,6 +272,7 @@ export class DashboardServer {
       this.configStore.set('windowSeconds', tuning.windowSeconds)
       this.circuitBreaker.setThreshold(tuning.circuitBreakerThreshold)
       this.circuitBreaker.setRecoveryMs(tuning.circuitBreakerRecoveryMs)
+      this.circuitBreaker.setSelfCancelMs(tuning.breakerSelfCancelMs)
       this.circuitBreaker.setWindow(tuning.windowFailures, tuning.windowSeconds)
       res.json(tuning)
     }))
@@ -534,6 +536,8 @@ export class DashboardServer {
       addedAt: key.addedAt,
       cooldownUntil: key.cooldownUntil,
       health: this.circuitBreaker.getState(key.id),
+      breakerTrippedAt: this.circuitBreaker.getTrippedAt(key.id),
+      breakerSelfCancelAt: this.circuitBreaker.getSelfCancelAt(key.id),
       consecutiveErrors: key.consecutiveErrors,
       windowFailureCount: this.circuitBreaker.getWindowFailureCount(key.id),
       requestCount: key.requestCount,
