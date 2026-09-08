@@ -338,6 +338,8 @@ export class ProxyServer {
               message: this.extractQuotaMessage(responseBody, upstreamRes.status),
             }
             this.keyManager.markExhausted(key.id, headerCooldownMs, signal)
+            this.circuitBreaker.recordFailure(key.id)
+            this.keyManager.markError(key.id)
             this.keyManager.recordRequest(key.id, {
               statusCode: upstreamRes.status,
               durationMs: duration,
@@ -550,7 +552,11 @@ export class ProxyServer {
     reason: string,
     isZenRequest: boolean,
   ): Promise<void> {
-    await this.notifier.circuitTripped(key.alias, key.consecutiveErrors)
+    const failures = Math.max(
+      this.circuitBreaker.getConsecutiveErrors(key.id),
+      this.circuitBreaker.getWindowFailureCount(key.id),
+    )
+    await this.notifier.circuitTripped(key.alias, failures)
     this.logStream.emit(this.logger, 'error', `Circuit breaker OPEN for key "${key.alias}"`, {
       method,
       path: targetPath,
