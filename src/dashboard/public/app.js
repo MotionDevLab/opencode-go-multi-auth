@@ -112,6 +112,11 @@ const api = {
   toggleKey(id, enabled) { return this.req(`/api/keys/${id}/toggle`, { method: 'PUT', body: { enabled } }); },
   reorderKeys(order) { return this.req('/api/keys/reorder', { method: 'PUT', body: { order } }); },
   resetCooldown(id) { return this.req(`/api/keys/${id}/reset-cooldown`, { method: 'POST' }); },
+  restKey(id) { return this.req(`/api/keys/${id}/rest`, { method: 'POST' }); },
+  resetBreaker(id) { return this.req(`/api/keys/${id}/reset-breaker`, { method: 'POST' }); },
+  clearSessions() { return this.req('/api/sessions/clear', { method: 'POST' }); },
+  failoverTuning() { return this.req('/api/failover-tuning'); },
+  setFailoverTuning(payload) { return this.req('/api/failover-tuning', { method: 'PUT', body: payload }); },
   removeKey(id) { return this.req(`/api/keys/${id}`, { method: 'DELETE' }); },
   config() { return this.req('/api/config'); },
   setConfig(payload) { return this.req('/api/config', { method: 'PUT', body: payload }); },
@@ -146,6 +151,7 @@ const state = {
   logById: new Map(),      // id -> log entry, for finding expanded row
   visibleModels: null,     // string[] or null (null = all)
   zenProviderName: 'multi-auth-zen', // opencode.json provider name for drift detection
+  failoverTuning: null,   // last fetched GET /api/failover-tuning (null = not loaded yet)
   zenDriftAnnounced: null, // last drift signature announced via toast (per session)
   zenDriftTimer: null,      // setTimeout handle for 12h re-check
 };
@@ -197,6 +203,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   initTokensPage();
   initLogsToolbar();
   initSearch();
+  initBreakStickiness();
   connectWebSocket();
   await refreshAll();
   await backfillLogs();
@@ -221,7 +228,29 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ---------------------------------------------------------------------------
 
 async function refreshAll() {
-  await Promise.all([refreshStrategies(), refreshKeys(), refreshSnapshot()]);
+  await Promise.all([refreshStrategies(), refreshKeys(), refreshSnapshot(), refreshFailoverTuning()]);
+}
+
+async function refreshFailoverTuning() {
+  try {
+    state.failoverTuning = await api.failoverTuning();
+  } catch {
+    state.failoverTuning = null;
+  }
+}
+
+function initBreakStickiness() {
+  const btn = $('#break-stickiness-btn');
+  if (!btn) return;
+  btn.addEventListener('click', async () => {
+    if (!confirm('Forget all sticky session → key pins? The next request for each session re-selects by routing strategy.')) return;
+    try {
+      await api.clearSessions();
+      toast('Session stickiness cleared', 'success');
+    } catch (err) {
+      toast(err.message, 'error');
+    }
+  });
 }
 
 async function refreshStrategies() {
@@ -402,6 +431,7 @@ function renderOverviewKpis() {
     { label: 'Enabled keys', value: s.enabledKeys ?? 0, accent: 'accent' },
     { label: 'Active', value: s.activeKeys ?? 0, accent: 'green' },
     { label: 'Cooldown', value: s.cooldownKeys ?? 0, accent: s.cooldownKeys ? 'yellow' : '' },
+    { label: 'Open breakers', value: s.openBreakers ?? 0, accent: (s.openBreakers ?? 0) > 0 ? 'yellow' : '' },
     { label: 'Requests', value: fmtTokens(s.totalRequests ?? 0) },
     { label: 'Quota errors', value: fmtNumber(s.quotaErrorCount ?? 0), accent: (s.quotaErrorCount ?? 0) > 0 ? 'yellow' : '' },
   ];
@@ -815,7 +845,7 @@ function renderAccountCard(key) {
     : '';
 
   const circuitChip = key.health === 'open'
-    ? '<span class="chip chip-red" title="Circuit breaker OPEN — this key is temporarily skipped due to consecutive 5xx errors.">⏻ open</span>'
+    ? '<span class="chip chip-red" title="Circuit breaker OPEN — this key is temporarily skipped due to consecutive failures (5xx or burst 429s).">⏻ open</span>'
     : key.health === 'half_open'
       ? '<span class="chip chip-yellow" title="Circuit breaker HALF-OPEN — probing if key has recovered.">◐ half-open</span>'
       : '';
@@ -823,6 +853,14 @@ function renderAccountCard(key) {
   const errorRate = key.requestCount > 0 ? ((key.errorCount / key.requestCount) * 100) : 0;
   const errRateColor = errorRate < 5 ? 'var(--green)' : errorRate < 20 ? 'var(--yellow)' : 'var(--red)';
   const errRateText = errorRate > 0 ? `<span style="color:${errRateColor};font-weight:600;">${errorRate.toFixed(1)}%</span>` : '0%';
+
+  const tuning = state.failoverTuning;
+  const breakerProgress = tuning
+    ? `<span><span class="label">Brk</span><strong>${key.consecutiveErrors ?? 0}/${tuning.circuitBreakerThreshold} · win ${key.windowFailureCount ?? 0}/${tuning.windowFailures}</strong></span>`
+    : '';
+  const hint = (key.requestCount || 0) >= 10 && errorRate >= 25
+    ? `<div class="account-hint">⚠ ${escapeHtml(key.alias)} at ${errorRate.toFixed(0)}% errors — consider Rest 12h or Break stickiness.</div>`
+    : '';
 
   return `
     <article class="account-card ${key.enabled ? '' : 'is-muted'}" data-id="${key.id}">
@@ -856,7 +894,9 @@ function renderAccountCard(key) {
           <span><span class="label">7d</span><strong>${fmtTokens(key.recentUsage?.last7d?.totalTokens || 0)} tok</strong></span>
           <span><span class="label">30d</span><strong>${fmtTokens(key.recentUsage?.last30d?.totalTokens || 0)} tok</strong></span>
           <span><span class="label">Mo</span><strong>${fmtTokens(key.recentUsage?.calendarMonth?.totalTokens || 0)} tok</strong></span>
+          ${breakerProgress}
         </div>
+        ${hint}
       </div>
 
       <div class="account-stat-bar">
@@ -876,6 +916,8 @@ function renderAccountCard(key) {
         </div>
         <div class="account-actions">
           <button class="btn btn-sm" data-action="reset" data-id="${key.id}">Reset cooldown</button>
+          <button class="btn btn-sm" data-action="rest" data-id="${key.id}" title="Park this key in cooldown for 12h (manual relief, no quota signal needed).">Rest 12h</button>
+          <button class="btn btn-sm" data-action="reset-breaker" data-id="${key.id}" title="Force the circuit breaker CLOSED and zero its failure counters.">Reset breaker</button>
           <button class="btn btn-sm" data-action="test" data-id="${key.id}">Test</button>
           <div class="toggle ${key.enabled ? 'on' : ''}" data-action="toggle" data-id="${key.id}" role="switch" aria-checked="${key.enabled}"></div>
           <button class="btn btn-sm btn-danger" data-action="remove" data-id="${key.id}">Remove</button>
@@ -909,6 +951,24 @@ function initAccountCardHandlers(host) {
   $$('button[data-action="reset"]', host).forEach((el) => {
     el.addEventListener('click', async () => {
       try { await api.resetCooldown(el.dataset.id); toast('Cooldown reset', 'success'); await refreshKeys(); }
+      catch (err) { toast(err.message, 'error'); }
+    });
+  });
+
+  // Rest 12h — manual relief: park the key in cooldown for a fixed 12h
+  $$('button[data-action="rest"]', host).forEach((el) => {
+    el.addEventListener('click', async () => {
+      const key = state.keys.find((k) => k.id === el.dataset.id);
+      if (!confirm(`Park "${key ? key.alias : el.dataset.id}" in cooldown for 12h? Traffic fails over to the next account.`)) return;
+      try { await api.restKey(el.dataset.id); toast('Key resting for 12h', 'success'); await refreshKeys(); }
+      catch (err) { toast(err.message, 'error'); }
+    });
+  });
+
+  // Reset breaker — force CLOSED, zero failure counters
+  $$('button[data-action="reset-breaker"]', host).forEach((el) => {
+    el.addEventListener('click', async () => {
+      try { await api.resetBreaker(el.dataset.id); toast('Breaker reset', 'success'); await refreshKeys(); }
       catch (err) { toast(err.message, 'error'); }
     });
   });
@@ -1135,6 +1195,68 @@ function renderRouting() {
         renderRouting();
       } catch (err) { toast(err.message, 'error'); }
     });
+  });
+  renderFailoverTuning();
+}
+
+async function renderFailoverTuning() {
+  const host = $('#failover-tuning-host');
+  if (!host) return;
+  if (!state.failoverTuning) await refreshFailoverTuning();
+  const t = state.failoverTuning;
+  if (!t) {
+    host.innerHTML = '<div class="empty-state">Failover tuning unavailable.</div>';
+    return;
+  }
+  host.innerHTML = `
+    <div class="card">
+      <div class="card-head">
+        <h3>Failover tuning</h3>
+        <span class="panel-meta">Live-applied, no restart needed</span>
+      </div>
+      <div class="card-body">
+        <p style="margin: 0 0 12px; color: var(--text-secondary); font-size: 13px;">
+          A key trips its breaker on <strong>${escapeHtml(String(t.circuitBreakerThreshold))} consecutive failures</strong>
+          or <strong>${escapeHtml(String(t.windowFailures))} failures within ${escapeHtml(String(t.windowSeconds))}s</strong> —
+          whichever comes first. Tripped keys are skipped until recovery, so the next request fails over to a cool account.
+        </p>
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
+          <label>Streak trip (2–10)<input class="input" type="number" min="2" max="10" id="ft-threshold" value="${t.circuitBreakerThreshold}"></label>
+          <label>Recovery (60–900s)<input class="input" type="number" min="60" max="900" id="ft-recovery" value="${Math.round(t.circuitBreakerRecoveryMs / 1000)}"></label>
+          <label>Window fails (3–20)<input class="input" type="number" min="3" max="20" id="ft-window-fails" value="${t.windowFailures}"></label>
+          <label>Window (60–600s)<input class="input" type="number" min="60" max="600" id="ft-window-secs" value="${t.windowSeconds}"></label>
+          <label>Retry-After cap (60–3600s)<input class="input" type="number" min="60" max="3600" id="ft-cap" value="${Math.round(t.retryAfterCapMs / 1000)}"></label>
+        </div>
+        <div style="display: flex; gap: 16px; margin-top: 12px; align-items: center; flex-wrap: wrap;">
+          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;">
+            <input type="checkbox" id="ft-burst" ${t.burstFailoverEnabled ? 'checked' : ''}> Burst-failover
+          </label>
+          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;">
+            <input type="checkbox" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
+          </label>
+          <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
+        </div>
+      </div>
+    </div>
+  `;
+  $('#ft-save').addEventListener('click', async () => {
+    const num = (id) => Number($(id).value);
+    const payload = {
+      circuitBreakerThreshold: num('#ft-threshold'),
+      circuitBreakerRecoveryMs: num('#ft-recovery') * 1000,
+      windowFailures: num('#ft-window-fails'),
+      windowSeconds: num('#ft-window-secs'),
+      retryAfterCapMs: num('#ft-cap') * 1000,
+      burstFailoverEnabled: $('#ft-burst').checked,
+      honorRetryAfter: $('#ft-retry-after').checked,
+    };
+    try {
+      state.failoverTuning = await api.setFailoverTuning(payload);
+      toast('Failover tuning saved', 'success');
+      renderFailoverTuning();
+    } catch (err) {
+      toast(err.message, 'error');
+    }
   });
 }
 

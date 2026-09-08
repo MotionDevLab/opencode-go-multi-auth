@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { KeyManager } from '../router/key-manager.js'
 import type { CircuitBreaker } from '../router/circuit-breaker.js'
 import type { QuotaTracker } from '../router/quota-tracker.js'
+import type { ProxyServer } from '../proxy/server.js'
 import { LogStream } from '../logging/log-stream.js'
 import { logToFile } from '../logging/logger.js'
 import { SecureStore } from '../storage/secure-store.js'
@@ -17,6 +18,8 @@ import {
   RoutingStrategy,
   ROUTING_STRATEGIES,
   normalizeRoutingStrategy,
+  tuningFromConfig,
+  validateFailoverTuning,
   type ApiKey,
 } from '../router/types.js'
 
@@ -24,6 +27,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const PUBLIC_DIR = path.join(__dirname, 'public')
 
 const FETCH_TIMEOUT_MS = 8_000
+const REST_12H_MS = 12 * 60 * 60 * 1000
 
 async function fetchJson(url: string, signal: AbortSignal): Promise<{ data?: Array<{ id?: string }> }> {
   const res = await fetch(url, { signal })
@@ -31,18 +35,72 @@ async function fetchJson(url: string, signal: AbortSignal): Promise<{ data?: Arr
   return res.json() as Promise<{ data?: Array<{ id?: string }> }>
 }
 
-function resolveOpenCodeConfigPath(): string {
-  return process.env.OPENCODE_CONFIG
-    || path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'opencode', 'opencode.json')
+function resolveOpenCodeConfigPaths(): string[] {
+  const paths: string[] = []
+  if (process.env.OPENCODE_CONFIG) paths.push(process.env.OPENCODE_CONFIG)
+  const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config')
+  paths.push(path.join(base, 'opencode', 'opencode.jsonc'))
+  paths.push(path.join(base, 'opencode', 'opencode.json'))
+  return paths
+}
+
+function stripJsonComments(src: string): string {
+  let out = ''
+  let i = 0
+  let inString = false
+  let escaped = false
+  while (i < src.length) {
+    const ch = src[i]
+    const next = src[i + 1]
+    if (inString) {
+      out += ch
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === '"') inString = false
+      i++
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      out += ch
+      i++
+      continue
+    }
+    if (ch === '/' && next === '/') {
+      while (i < src.length && src[i] !== '\n') i++
+      continue
+    }
+    if (ch === '/' && next === '*') {
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++
+      i += 2
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
 }
 
 function readOpenCodeConfig(): Record<string, unknown> | null {
-  try {
-    const raw = fs.readFileSync(resolveOpenCodeConfigPath(), 'utf8')
-    return JSON.parse(raw) as Record<string, unknown>
-  } catch {
-    return null
+  for (const candidate of resolveOpenCodeConfigPaths()) {
+    let raw: string
+    try {
+      raw = fs.readFileSync(candidate, 'utf8')
+    } catch {
+      continue
+    }
+    try {
+      return JSON.parse(raw) as Record<string, unknown>
+    } catch {
+      try {
+        return JSON.parse(stripJsonComments(raw)) as Record<string, unknown>
+      } catch {
+        continue
+      }
+    }
   }
+  return null
 }
 
 type AsyncHandler = (req: express.Request<any>, res: Response, next: NextFunction) => Promise<void>
@@ -67,6 +125,7 @@ export class DashboardServer {
     private secureStore: SecureStore,
     private configStore: ConfigStore,
     private notifier: NtfyNotifier,
+    private proxyServer?: Pick<ProxyServer, 'clearSessionAffinity'>,
   ) {
     this.port = port
     this.openCodeUsageStore = new OpenCodeUsageStore()
@@ -149,6 +208,58 @@ export class DashboardServer {
 
       this.keyManager.resetCooldown(req.params.id)
       res.json(this.serializeKey(key))
+    }))
+
+    this.app.post('/api/keys/:id/rest', wrap(async (req, res) => {
+      const key = this.keyManager.getKeyById(req.params.id)
+      if (!key) {
+        res.status(404).json({ error: 'Key not found' })
+        return
+      }
+
+      this.keyManager.markExhausted(req.params.id, REST_12H_MS)
+      res.json(this.serializeKey(key))
+    }))
+
+    this.app.post('/api/keys/:id/reset-breaker', wrap(async (req, res) => {
+      const key = this.keyManager.getKeyById(req.params.id)
+      if (!key) {
+        res.status(404).json({ error: 'Key not found' })
+        return
+      }
+
+      this.circuitBreaker.reset(req.params.id)
+      this.keyManager.resetErrorCount(req.params.id)
+      res.json(this.serializeKey(key))
+    }))
+
+    this.app.post('/api/sessions/clear', wrap(async (_req, res) => {
+      this.proxyServer?.clearSessionAffinity()
+      res.json({ success: true })
+    }))
+
+    this.app.get('/api/failover-tuning', wrap(async (_req, res) => {
+      res.json(tuningFromConfig(this.configStore.getAll()))
+    }))
+
+    this.app.put('/api/failover-tuning', wrap(async (req, res) => {
+      const parsed = validateFailoverTuning(req.body)
+      if (!parsed.ok) {
+        res.status(400).json({ error: parsed.error })
+        return
+      }
+      const tuning = parsed.value
+      this.configStore.set('circuitBreakerThreshold', tuning.circuitBreakerThreshold)
+      this.configStore.set('circuitBreakerRecoveryMs', tuning.circuitBreakerRecoveryMs)
+      this.configStore.set('burstFailoverEnabled', tuning.burstFailoverEnabled)
+      this.configStore.set('honorRetryAfter', tuning.honorRetryAfter)
+      this.configStore.set('retryAfterCapMs', tuning.retryAfterCapMs)
+      this.configStore.set('windowFailures', tuning.windowFailures)
+      this.configStore.set('windowSeconds', tuning.windowSeconds)
+      this.circuitBreaker.setThreshold(tuning.circuitBreakerThreshold)
+      this.circuitBreaker.setRecoveryMs(tuning.circuitBreakerRecoveryMs)
+      this.circuitBreaker.setWindow(tuning.windowFailures, tuning.windowSeconds)
+      res.json(tuning)
     }))
 
     this.app.put('/api/keys/:id/key', wrap(async (req, res) => {
@@ -340,6 +451,8 @@ export class DashboardServer {
         enabledKeys: keys.filter((key) => key.enabled).length,
         activeKeys: keys.filter((key) => key.enabled && key.status === 'active').length,
         cooldownKeys: keys.filter((key) => key.status === 'cooldown').length,
+        openBreakers: keys.filter((key) => key.health === 'open').length,
+        effectiveAvailable: keys.filter((key) => key.enabled && key.status === 'active' && key.health !== 'open').length,
         totalRequests: keys.reduce((sum, key) => sum + key.requestCount, 0),
         totalTokens: keys.reduce((sum, key) => sum + key.tokensUsed, 0),
         observedCost: keys.reduce((sum, key) => sum + (key.costAccumulated || 0), 0),
@@ -408,6 +521,8 @@ export class DashboardServer {
       addedAt: key.addedAt,
       cooldownUntil: key.cooldownUntil,
       health: this.circuitBreaker.getState(key.id),
+      consecutiveErrors: key.consecutiveErrors,
+      windowFailureCount: this.circuitBreaker.getWindowFailureCount(key.id),
       requestCount: key.requestCount,
       successCount: key.successCount,
       errorCount: key.errorCount,

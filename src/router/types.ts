@@ -77,6 +77,12 @@ export interface RouterConfig {
   proxyPort: number
   cooldownMs: number
   circuitBreakerThreshold: number
+  circuitBreakerRecoveryMs: number
+  burstFailoverEnabled: boolean
+  honorRetryAfter: boolean
+  retryAfterCapMs: number
+  windowFailures: number
+  windowSeconds: number
   logLevel: string
   configDir: string
   strategy: RoutingStrategy
@@ -147,6 +153,12 @@ export const DEFAULT_CONFIG: RouterConfig = {
   proxyPort: 18905,
   cooldownMs: 5 * 60 * 60 * 1000,
   circuitBreakerThreshold: 3,
+  circuitBreakerRecoveryMs: 300_000,
+  burstFailoverEnabled: true,
+  honorRetryAfter: true,
+  retryAfterCapMs: 900_000,
+  windowFailures: 8,
+  windowSeconds: 180,
   logLevel: 'info',
   configDir: '',
   strategy: RoutingStrategy.PRIORITY_FAILOVER,
@@ -162,4 +174,64 @@ export enum CircuitState {
   CLOSED = 'closed',
   OPEN = 'open',
   HALF_OPEN = 'half_open',
+}
+
+export interface FailoverTuning {
+  circuitBreakerThreshold: number
+  circuitBreakerRecoveryMs: number
+  burstFailoverEnabled: boolean
+  honorRetryAfter: boolean
+  retryAfterCapMs: number
+  windowFailures: number
+  windowSeconds: number
+}
+
+export const FAILOVER_TUNING_RANGES = {
+  circuitBreakerThreshold: { min: 2, max: 10 },
+  circuitBreakerRecoveryMs: { min: 60_000, max: 900_000 },
+  retryAfterCapMs: { min: 60_000, max: 3_600_000 },
+  windowFailures: { min: 3, max: 20 },
+  windowSeconds: { min: 60, max: 600 },
+} as const
+
+function checkIntRange(name: string, value: unknown, min: number, max: number): string | null {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return `${name} must be an integer`
+  if (value < min || value > max) return `${name} must be between ${min} and ${max}`
+  return null
+}
+
+export function validateFailoverTuning(input: unknown): { ok: true; value: FailoverTuning } | { ok: false; error: string } {
+  if (!input || typeof input !== 'object') return { ok: false, error: 'body must be an object' }
+  const v = input as Record<string, unknown>
+  for (const [name, range] of Object.entries(FAILOVER_TUNING_RANGES)) {
+    const problem = checkIntRange(name, v[name], range.min, range.max)
+    if (problem) return { ok: false, error: problem }
+  }
+  for (const name of ['burstFailoverEnabled', 'honorRetryAfter']) {
+    if (typeof v[name] !== 'boolean') return { ok: false, error: `${name} must be a boolean` }
+  }
+  return {
+    ok: true,
+    value: {
+      circuitBreakerThreshold: v.circuitBreakerThreshold as number,
+      circuitBreakerRecoveryMs: v.circuitBreakerRecoveryMs as number,
+      burstFailoverEnabled: v.burstFailoverEnabled as boolean,
+      honorRetryAfter: v.honorRetryAfter as boolean,
+      retryAfterCapMs: v.retryAfterCapMs as number,
+      windowFailures: v.windowFailures as number,
+      windowSeconds: v.windowSeconds as number,
+    },
+  }
+}
+
+export function tuningFromConfig(config: RouterConfig): FailoverTuning {
+  return {
+    circuitBreakerThreshold: config.circuitBreakerThreshold,
+    circuitBreakerRecoveryMs: config.circuitBreakerRecoveryMs,
+    burstFailoverEnabled: config.burstFailoverEnabled,
+    honorRetryAfter: config.honorRetryAfter,
+    retryAfterCapMs: config.retryAfterCapMs,
+    windowFailures: config.windowFailures,
+    windowSeconds: config.windowSeconds,
+  }
 }

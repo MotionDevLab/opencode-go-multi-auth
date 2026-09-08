@@ -211,6 +211,13 @@ export class KeyManager {
     this.clearQuotaError(id)
   }
 
+  resetErrorCount(id: string): void {
+    const key = this.getKeyById(id)
+    if (!key || key.consecutiveErrors === 0) return
+    key.consecutiveErrors = 0
+    this.onChange?.()
+  }
+
   setEnabled(id: string, enabled: boolean): ApiKey | null {
     const key = this.getKeyById(id)
     if (!key) return null

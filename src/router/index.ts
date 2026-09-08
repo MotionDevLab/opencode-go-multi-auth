@@ -11,7 +11,7 @@ import { RuntimeStateStore } from '../storage/runtime-state-store.js'
 import { NtfyNotifier } from '../notification/ntfy.js'
 import { printSetupInstructions } from '../plugin/index.js'
 import type { RouterConfig } from './types.js'
-import { DEFAULT_CONFIG, normalizeRoutingStrategy } from './types.js'
+import { DEFAULT_CONFIG, normalizeRoutingStrategy, tuningFromConfig } from './types.js'
 
 export interface RouterInstance {
   keyManager: KeyManager
@@ -37,6 +37,14 @@ function readPositiveInt(value: string | undefined, fallback: number): number {
   return Math.floor(parsed)
 }
 
+function readBoolean(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined) return fallback
+  const normalized = value.trim().toLowerCase()
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false
+  return fallback
+}
+
 function loadEnvConfig(): Partial<RouterConfig> {
   return {
     upstreamUrl: process.env.UPSTREAM_URL || DEFAULT_CONFIG.upstreamUrl,
@@ -45,6 +53,12 @@ function loadEnvConfig(): Partial<RouterConfig> {
     proxyPort: Number(process.env.PROXY_PORT) || DEFAULT_CONFIG.proxyPort,
     cooldownMs: Number(process.env.COOLDOWN_MS) || DEFAULT_CONFIG.cooldownMs,
     circuitBreakerThreshold: Number(process.env.CIRCUIT_BREAKER_THRESHOLD) || DEFAULT_CONFIG.circuitBreakerThreshold,
+    circuitBreakerRecoveryMs: Number(process.env.CIRCUIT_BREAKER_RECOVERY_MS) || DEFAULT_CONFIG.circuitBreakerRecoveryMs,
+    burstFailoverEnabled: readBoolean(process.env.BURST_FAILOVER_ENABLED, DEFAULT_CONFIG.burstFailoverEnabled),
+    honorRetryAfter: readBoolean(process.env.HONOR_RETRY_AFTER, DEFAULT_CONFIG.honorRetryAfter),
+    retryAfterCapMs: Number(process.env.RETRY_AFTER_CAP_MS) || DEFAULT_CONFIG.retryAfterCapMs,
+    windowFailures: Number(process.env.WINDOW_FAILURES) || DEFAULT_CONFIG.windowFailures,
+    windowSeconds: Number(process.env.WINDOW_SECONDS) || DEFAULT_CONFIG.windowSeconds,
     logLevel: process.env.LOG_LEVEL || DEFAULT_CONFIG.logLevel,
     configDir: process.env.CONFIG_DIR || DEFAULT_CONFIG.configDir,
     ntfyUrl: process.env.NTFY_URL || DEFAULT_CONFIG.ntfyUrl,
@@ -90,7 +104,12 @@ export async function createRouter(
   mergedConfig.ntfyUrl = configStore.get('ntfyUrl') || mergedConfig.ntfyUrl
   mergedConfig.visibleModels = configStore.get('visibleModels') || mergedConfig.visibleModels
   keyManager = new KeyManager(mergedConfig, persistRuntimeState)
-  const circuitBreaker = new CircuitBreaker(mergedConfig.circuitBreakerThreshold)
+  const circuitBreaker = new CircuitBreaker(
+    mergedConfig.circuitBreakerThreshold,
+    mergedConfig.circuitBreakerRecoveryMs,
+    mergedConfig.windowFailures,
+    mergedConfig.windowSeconds,
+  )
   quotaTracker = new QuotaTracker(2000, persistRuntimeState)
 
   const storedKeys = await secureStore.loadKeys()
@@ -124,6 +143,7 @@ export async function createRouter(
     logStream,
     logger,
     () => normalizeRoutingStrategy(configStore.get('strategy')),
+    () => tuningFromConfig(configStore.getAll()),
     notifier,
   )
 
@@ -137,6 +157,7 @@ export async function createRouter(
     secureStore,
     configStore,
     notifier,
+    proxyServer,
   )
 
   await proxyServer.start()

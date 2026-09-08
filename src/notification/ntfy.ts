@@ -82,7 +82,7 @@ export class NtfyNotifier {
     if (!this.enabled) return
     await this.send(
       `Circuit Breaker: ${alias}`,
-      `Circuit breaker OPEN for key "${alias}" after ${errors} consecutive 5xx errors. Temporarily removing from pool.`,
+      `Circuit breaker OPEN for key "${alias}" after ${errors} consecutive failures. Temporarily removing from pool.`,
       'high',
     )
   }

@@ -11,12 +11,13 @@ import {
   RoutingStrategy,
   normalizeRoutingStrategy,
   type ApiKey,
+  type FailoverTuning,
   type KeySelection,
   type QuotaErrorSignal,
 } from '../router/types.js'
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
 import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator } from './zen-responses.js'
-import { isQuota429, resolveCooldownMs } from './quota-detector.js'
+import { isQuota429, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
 import { estimateCost } from './rate-card.js'
 import { SessionAffinityStore } from './session-affinity.js'
@@ -97,10 +98,15 @@ export class ProxyServer {
     private logStream: LogStream,
     private logger: AppLogger,
     private getStrategy: () => RoutingStrategy,
+    private getTuning: () => FailoverTuning,
     private notifier: NtfyNotifier = new NtfyNotifier(),
   ) {
     this.config = config
     this.sessionAffinity = new SessionAffinityStore()
+  }
+
+  clearSessionAffinity(): void {
+    this.sessionAffinity.clear()
   }
 
   async start(): Promise<void> {
@@ -392,8 +398,31 @@ export class ProxyServer {
           attemptedKeyIds.add(key.id)
 
           if (circuitState === CircuitState.OPEN) {
-            await this.notifier.circuitTripped(key.alias, key.consecutiveErrors)
-            this.logStream.emit(this.logger, 'error', `Circuit breaker OPEN for key "${key.alias}"`, {
+            await this.emitCircuitOpen(key, req.method, upstreamRes.status, targetPath, prepared.model, strategy, reason, isZenRequest)
+          }
+
+          if (attempt < maxAttempts - 1) {
+            continue
+          }
+        } else if (upstreamRes.status === 429 || upstreamRes.status === 402) {
+          // Non-quota 429/402 (quota positives `continue` above): burst or
+          // transient rate limiting. The 429 is still returned verbatim —
+          // no same-request key-burning — but with burst-failover on the key
+          // feeds the breaker so the NEXT request fails over.
+          if (this.getTuning().burstFailoverEnabled) {
+            const recoveryOverride = this.resolveBurstRecoveryMs(upstreamRes.headers)
+            const circuitState = this.circuitBreaker.recordFailure(key.id, recoveryOverride)
+            this.keyManager.markError(key.id)
+            if (circuitState === CircuitState.OPEN) {
+              await this.emitCircuitOpen(key, req.method, upstreamRes.status, targetPath, prepared.model, strategy, reason, isZenRequest)
+            }
+          }
+        } else if (upstreamRes.status < 400) {
+          const recovered = this.circuitBreaker.recordSuccess(key.id)
+          key.consecutiveErrors = 0
+          if (recovered) {
+            await this.notifier.circuitRecovered(key.alias)
+            this.logStream.emit(this.logger, 'info', `Circuit breaker CLOSED for key "${key.alias}" (probe succeeded)`, {
               method: req.method,
               path: targetPath,
               keyAlias: key.alias,
@@ -405,14 +434,10 @@ export class ProxyServer {
               upstream: isZenRequest ? 'zen' : 'go',
             })
           }
-
-          if (attempt < maxAttempts - 1) {
-            continue
-          }
-        } else {
-          this.circuitBreaker.recordSuccess(key.id)
-          key.consecutiveErrors = 0
         }
+        // Other 4xx (400, 403, 404 probes, …) are count-only via the tail
+        // recordRequest below: they say nothing about key health, so they
+        // neither feed nor reset the breaker.
 
         const responseHeaders = this.buildResponseHeaders(upstreamRes)
         if (translateZenResponses && upstreamRes.status < 400 && upstreamRes.body) {
@@ -457,7 +482,7 @@ export class ProxyServer {
           successful: upstreamRes.status < 400,
         })
 
-        if (sessionKey) {
+        if (sessionKey && upstreamRes.status < 400) {
           this.sessionAffinity.setPreferredKey(sessionKey, key.id)
         }
 
@@ -513,6 +538,38 @@ export class ProxyServer {
 
     res.writeHead(503, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ error: 'All API keys failed', detail: lastError }))
+  }
+
+  private async emitCircuitOpen(
+    key: ApiKey,
+    method: string | undefined,
+    statusCode: number,
+    targetPath: string,
+    model: string | null,
+    strategy: RoutingStrategy,
+    reason: string,
+    isZenRequest: boolean,
+  ): Promise<void> {
+    await this.notifier.circuitTripped(key.alias, key.consecutiveErrors)
+    this.logStream.emit(this.logger, 'error', `Circuit breaker OPEN for key "${key.alias}"`, {
+      method,
+      path: targetPath,
+      keyAlias: key.alias,
+      keyId: key.id,
+      statusCode,
+      model,
+      strategy,
+      routeReason: reason,
+      upstream: isZenRequest ? 'zen' : 'go',
+    })
+  }
+
+  private resolveBurstRecoveryMs(headers: Headers): number | null {
+    const tuning = this.getTuning()
+    if (!tuning.honorRetryAfter) return null
+    const headerMs = parseRetryAfterHeaderMs(Object.fromEntries(headers), Date.now())
+    if (headerMs === null) return null
+    return Math.min(Math.max(headerMs, tuning.circuitBreakerRecoveryMs), tuning.retryAfterCapMs)
   }
 
   private selectKey(sessionKey: string | undefined, attemptedKeyIds: Set<string>): RoutingDecision | null {

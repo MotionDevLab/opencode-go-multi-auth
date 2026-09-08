@@ -949,6 +949,13 @@ input, select, textarea {
 }
 .account-quota-line strong { color: var(--red); font-weight: 500; }
 
+.account-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--yellow);
+  line-height: 1.5;
+}
+
 .account-replace-popover {
   position: absolute;
   z-index: 30;
