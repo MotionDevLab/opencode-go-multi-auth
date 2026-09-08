@@ -956,6 +956,33 @@ input, select, textarea {
   line-height: 1.5;
 }
 
+.ft-group {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--r-md);
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+
+.ft-group-trip { border-left-color: var(--red); }
+.ft-group-recover { border-left-color: var(--yellow); }
+.ft-group-counts { border-left-color: var(--green); }
+
+.ft-group-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.ft-legend {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
 .account-replace-popover {
   position: absolute;
   z-index: 30;

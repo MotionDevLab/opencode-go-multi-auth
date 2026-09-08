@@ -1242,22 +1242,41 @@ async function renderFailoverTuning() {
           request probes it: success closes the breaker, failure re-trips it. Tuning changes apply live to future
           trips; an already-open key keeps the timeout it tripped with.
         </p>
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;">
-          <label>Streak trip (2–10)<input class="input" type="number" min="2" max="10" id="ft-threshold" value="${t.circuitBreakerThreshold}"><small style="color: var(--text-faint); font-size: 11px;">Unbroken failure run that trips. Lower = faster spill, more false trips on flapping bursts.</small></label>
-          <label>Recovery (60–900s)<input class="input" type="number" min="60" max="900" id="ft-recovery" value="${Math.round(t.circuitBreakerRecoveryMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Fallback exile length when nothing else sets one. Keep above ~60s so probes don't fire into the same Retry-After window.</small></label>
-          <label>Self-cancel (0 or 30–900s)<input class="input" type="number" min="0" max="900" id="ft-self-cancel" value="${Math.round((t.breakerSelfCancelMs || 0) / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Proactive OPEN → half-open timer, fires without traffic. 0 = follow Recovery. Upstream Retry-After overrides both when honored.</small></label>
-          <label>Window fails (3–20)<input class="input" type="number" min="3" max="20" id="ft-window-fails" value="${t.windowFailures}"></label>
-          <label>Window (60–600s)<input class="input" type="number" min="60" max="600" id="ft-window-secs" value="${t.windowSeconds}"><small style="color: var(--text-faint); font-size: 11px;">Slow-burn trip: N failures inside M seconds, even with 200s between them. Catches degrading keys the streak rule misses.</small></label>
-          <label>Retry-After cap (60–3600s)<input class="input" type="number" min="60" max="3600" id="ft-cap" value="${Math.round(t.retryAfterCapMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Upper bound for upstream-supplied waits. Caps one Retry-After header from exiling a key for hours.</small></label>
+        <div class="ft-group ft-group-trip">
+          <div class="ft-group-label">Trip conditions — either one opens the breaker</div>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;">
+            <label>Streak trip (2–10)<input class="input" type="number" min="2" max="10" id="ft-threshold" value="${t.circuitBreakerThreshold}"><small style="color: var(--text-faint); font-size: 11px;">Unbroken failure run that trips. Lower = faster spill, more false trips on flapping bursts.</small></label>
+            <label>Window fails (3–20)<input class="input" type="number" min="3" max="20" id="ft-window-fails" value="${t.windowFailures}"><small style="color: var(--text-faint); font-size: 11px;">Failure count inside the window that trips. Higher = tolerates longer flapping before spilling to the next account.</small></label>
+            <label>Window (60–600s)<input class="input" type="number" min="60" max="600" id="ft-window-secs" value="${t.windowSeconds}"><small style="color: var(--text-faint); font-size: 11px;">Slow-burn trip: N failures inside M seconds, even with 200s between them. Catches degrading keys the streak rule misses.</small></label>
+          </div>
         </div>
-        <div style="display: flex; gap: 16px; margin-top: 12px; align-items: center; flex-wrap: wrap;">
-          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Count burst-429s toward the breaker so the NEXT request fails over. Off = pre-tuning behavior: 429s never trip, keys cook.">
-            <input type="checkbox" id="ft-burst" ${t.burstFailoverEnabled ? 'checked' : ''}> Burst-failover
-          </label>
-          <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header (clamped between Recovery and the cap) as the exile length instead of the flat Recovery value.">
-            <input type="checkbox" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
-          </label>
-          <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
+        <div class="ft-group ft-group-recover">
+          <div class="ft-group-label">Recovery timing — how a tripped key comes back</div>
+          <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;">
+            <label>Recovery (60–900s)<input class="input" type="number" min="60" max="900" id="ft-recovery" value="${Math.round(t.circuitBreakerRecoveryMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Fallback exile length when nothing else sets one. Keep above ~60s so probes don't fire into the same Retry-After window.</small></label>
+            <label>Self-cancel (0 or 30–900s)<input class="input" type="number" min="0" max="900" id="ft-self-cancel" value="${Math.round((t.breakerSelfCancelMs || 0) / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Proactive OPEN → half-open timer, fires without traffic. 0 = follow Recovery. Upstream Retry-After overrides both when honored.</small></label>
+            <label>Retry-After cap (60–3600s)<input class="input" type="number" min="60" max="3600" id="ft-cap" value="${Math.round(t.retryAfterCapMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Upper bound for upstream-supplied waits. Caps one Retry-After header from exiling a key for hours.</small></label>
+          </div>
+        </div>
+        <div class="ft-group ft-group-counts">
+          <div class="ft-group-label">What counts — same colors as the Logs page</div>
+          <div class="ft-legend">
+            <span class="chip chip-green">2xx resets streak</span>
+            <span class="chip chip-red">5xx feeds breaker</span>
+            <span class="chip chip-yellow">burst-429 feeds breaker</span>
+            <span class="chip chip-yellow">quota-429 → cooldown + failover</span>
+            <span class="chip chip-muted">other 4xx count-only</span>
+            <span class="chip chip-muted">transport errors never trip</span>
+          </div>
+          <div style="display: flex; gap: 16px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Count burst-429s toward the breaker so the NEXT request fails over. Off = pre-tuning behavior: 429s never trip, keys cook.">
+              <input type="checkbox" id="ft-burst" ${t.burstFailoverEnabled ? 'checked' : ''}> Burst-failover
+            </label>
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header (clamped between Recovery and the cap) as the exile length instead of the flat Recovery value.">
+              <input type="checkbox" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
+            </label>
+            <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
+          </div>
         </div>
       </div>
     </div>
