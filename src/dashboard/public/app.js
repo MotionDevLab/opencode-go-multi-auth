@@ -686,7 +686,7 @@ function renderOverviewChart(force = false) {
   const legend = overviewStackedAreaSvg.lastLegend || '';
   host.innerHTML = svg
     + legend
-    + `<div style="margin-top:6px;"><div style="font-size:10px;color:var(--text-secondary);font-family:var(--font-mono);margin-bottom:2px;">429 / 5xx per key (last 1h)</div>${strip}</div>`;
+    + `<div style="margin-top:6px;padding-bottom:12px;"><div style="font-size:10px;color:var(--text-secondary);font-family:var(--font-mono);margin-bottom:2px;">429 / 5xx per key (last 1h)</div>${strip}</div>`;
   const staticLegend = host.parentElement ? host.parentElement.querySelector(':scope > .chart-legend') : null;
   if (staticLegend && legend) staticLegend.style.display = 'none';
 }
