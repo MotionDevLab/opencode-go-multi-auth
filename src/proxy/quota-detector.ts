@@ -99,6 +99,51 @@ export function parseResetFromErrorText(bodyText: string, now: number): number |
   return null
 }
 
+const LOCAL_OUTAGE_CODES = new Set([
+  'enotfound',
+  'eai_again',
+  'eai_noname',
+  'enetunreach',
+  'enetdown',
+  'ehostunreach',
+  'ehostdown',
+])
+
+const LOCAL_OUTAGE_TEXT = /network is unreachable|no internet|getaddrinfo|failed to resolve|unable to resolve|name or service not known|temporary failure in name resolution/i
+
+function collectCauseChain(err: unknown): Array<{ code?: string; message?: string }> {
+  const chain: Array<{ code?: string; message?: string }> = []
+  const seen = new Set<unknown>()
+  let current: unknown = err
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current)
+    const record = current as { code?: unknown; message?: unknown; cause?: unknown }
+    chain.push({
+      code: typeof record.code === 'string' ? record.code : undefined,
+      message: typeof record.message === 'string' ? record.message : undefined,
+    })
+    current = record.cause
+  }
+  return chain
+}
+
+/**
+ * True only when the failure proves the request never left the machine
+ * (DNS dead, no route to host/network). Requires a concrete local marker
+ * from the error or ANY level of its `cause` chain — a bare "fetch failed"
+ * is deliberately NOT enough, since upstream resets/TLS failures produce
+ * the same surface message. False negatives fall through to the existing
+ * transport-error path (counted, never trips, failover preserved), which is
+ * the safe direction: misclassifying upstream as local would skip failover.
+ */
+export function isLocalNetworkOutage(err: unknown): boolean {
+  for (const link of collectCauseChain(err)) {
+    if (link.code && LOCAL_OUTAGE_CODES.has(link.code.toLowerCase())) return true
+    if (link.message && LOCAL_OUTAGE_TEXT.test(link.message)) return true
+  }
+  return false
+}
+
 export function extractCodexResetMs(headers: Record<string, string>, now: number): number | null {
   let latest: number | null = null
 

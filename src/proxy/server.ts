@@ -17,7 +17,7 @@ import {
 } from '../router/types.js'
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
 import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator } from './zen-responses.js'
-import { isQuota429, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
+import { isLocalNetworkOutage, isQuota429, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
 import { estimateCost } from './rate-card.js'
 import { SessionAffinityStore } from './session-affinity.js'
@@ -510,6 +510,41 @@ export class ProxyServer {
       } catch (err) {
         if (upstreamHungTimer) clearTimeout(upstreamHungTimer)
         lastError = err instanceof Error ? err.message : String(err)
+        // Local network outage (DNS down, no route, Wi-Fi off): the fetch
+        // never left the machine, so this says nothing about the key or the
+        // upstream. Count it (honest REQ/ERR) but burn NOTHING — no breaker
+        // feed, no window entry, no failover consumption — and fail fast with
+        // a distinct message instead of cycling all keys against a dead NIC.
+        if (isLocalNetworkOutage(err)) {
+          this.keyManager.recordRequest(key.id, {
+            statusCode: 0,
+            durationMs: Date.now() - startTime,
+            model: prepared.model,
+            sessionId: upstreamSessionId ?? sessionKey ?? null,
+            successful: false,
+          })
+          lastError = `local network unreachable (${lastError}) — check Wi-Fi/VPN, keys untouched`
+          this.logStream.emit(this.logger, 'warn', `Local network unreachable, key "${key.alias}" untouched`, {
+            method: req.method,
+            path: targetPath,
+            keyAlias: key.alias,
+            keyId: key.id,
+            model: prepared.model,
+            strategy,
+            routeReason: reason,
+            upstream: isZenRequest ? 'zen' : 'go',
+            localOutage: true,
+          })
+          if (upstreamClientCloseHandler) {
+            res.removeListener('close', upstreamClientCloseHandler)
+          }
+          if (!upstreamAbortController.signal.aborted) {
+            upstreamAbortController.abort()
+          }
+          res.writeHead(503, { 'content-type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Local network unreachable — check Wi-Fi/VPN. No keys were burned.', detail: lastError }))
+          return
+        }
         this.keyManager.recordRequest(key.id, {
           statusCode: 0,
           durationMs: Date.now() - startTime,
