@@ -356,7 +356,6 @@ function ingestLog(entry, { initial = false } = {}) {
 
   if (entry.meta?.method) {
     pushChartPoint(entry);
-    recordRequestTick(entry);
   }
 
   if (state.currentPage === 'logs') {
@@ -872,34 +871,23 @@ function overviewLegendSvg(drawKeys, keyColorIdx, stackColors, buckets) {
   return `<div class="chart-legend" style="padding:4px 0 0;">${items.join('')}</div>`;
 }
 
-function sparklineSvg(values, opts = {}) {
-  const width = opts.width || 140;
-  const height = opts.height || 28;
-  if (values.length < 2) {
-    return `<svg class="sparkline" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}"></svg>`;
-  }
-  const max = Math.max(1, ...values);
-  const min = Math.min(0, ...values);
-  const span = Math.max(1, max - min);
-  const stepX = width / (values.length - 1);
-  const pts = values.map((v, i) => `${(i * stepX).toFixed(1)},${(height - ((v - min) / span) * height).toFixed(1)}`);
-  const area = `M0,${height} L${pts.join(' L')} L${width},${height} Z`;
-  return `<svg class="sparkline" viewBox="0 0 ${width} ${height}" width="${width}" height="${height}">
-    <path class="area" d="${area}"/>
-    <polyline points="${pts.join(' ')}"/>
-  </svg>`;
-}
-
-// Per-key request rate rolling window
-const requestRateByKey = new Map();
-function recordRequestTick(entry) {
-  const k = entry.meta?.keyId;
-  if (!k) return;
-  if (!requestRateByKey.has(k)) requestRateByKey.set(k, []);
-  const arr = requestRateByKey.get(k);
-  arr.push(Date.now());
+// 5m per-key readout from the persisted log buffer (survives reload,
+// unlike the old requestRateByKey page-memory map). err = statusCode >= 400 or 0 (transport).
+function keyLast5m(keyId) {
   const cutoff = Date.now() - 5 * 60 * 1000;
-  while (arr.length > 0 && arr[0] < cutoff) arr.shift();
+  let req = 0, err = 0;
+  for (const buf of [state.archivedLogs, state.recentLogs]) {
+    if (!buf) continue;
+    for (const e of buf) {
+      if (e.meta?.keyId !== keyId) continue;
+      const ts = e.timestamp ? new Date(e.timestamp).getTime() : 0;
+      if (ts < cutoff) continue;
+      req++;
+      const sc = e.meta?.statusCode;
+      if (typeof sc !== 'number' || sc >= 400) err++;
+    }
+  }
+  return { req, err };
 }
 
 // ---------------------------------------------------------------------------
@@ -929,7 +917,9 @@ function renderAccountCard(key) {
   const b = key.quota?.tokensBreakdown || {};
   const total = (b.input || 0) + (b.output || 0) + (b.cacheRead || 0) + (b.cacheWrite || 0) + (b.reasoning || 0);
   const pct = (v) => total > 0 ? (v / total) * 100 : 0;
-  const recent = (requestRateByKey.get(key.id) || []).slice(-30).map((t) => 1);
+  const w5 = keyLast5m(key.id);
+  const w5color = w5.err === 0 ? 'var(--green)' : (w5.err / Math.max(1, w5.req)) < 0.2 ? 'var(--yellow)' : 'var(--red)';
+  const w5html = `<span class="w5" title="Requests (errors) in the last 5 minutes, from the persisted log buffer."><span class="label">5m</span><strong>${w5.req} req · <span style="color:${w5color};">${w5.err} err</span></strong></span>`;
   const lastModel = key.lastModel || '—';
   const cooldown = key.cooldownUntil && key.cooldownUntil > Date.now()
     ? `<span class="account-cooldown">cooldown ${fmtCooldown(key.cooldownUntil)}</span>` : '';
@@ -1008,8 +998,7 @@ function renderAccountCard(key) {
 
       <div class="account-stat-bar">
         <div class="account-sparkline-wrap">
-          <span class="account-sparklabel">5m req</span>
-          ${sparklineSvg(recent)}
+          ${w5html}
         </div>
         <div class="account-stackedwrap">
           <div class="stacked-bar" title="Token breakdown for this account (all time)">
@@ -2032,6 +2021,16 @@ function stackedAreaChartSvg(buckets, opts) {
     areaPaths.push(`<path d="${path}" fill="${cat.color}" fill-opacity="0.55" stroke="${cat.color}" stroke-opacity="0.5" stroke-width="0.5"/>`);
   }
 
+  // Hover probes: one transparent rect per bucket, full plot height. Same
+  // pattern as the Overview throughput chart — values are per-bucket
+  // aggregates (whatever bucketMs the window uses), not per-request.
+  const probeW = buckets.length > 1 ? Math.max(8, (x(buckets[1].t) - x(buckets[0].t))) : innerW;
+  const probeRects = buckets.map((b) => {
+    const rows = TOKENS_CATEGORIES.map((c) => `${c.label}: ${fmtTokens(b.byCategory[c.key] || 0)}`).join(' · ');
+    const tot = fmtTokens(TOKENS_CATEGORIES.reduce((s, c) => s + (b.byCategory[c.key] || 0), 0));
+    return `<rect x="${(x(b.t) - probeW / 2).toFixed(1)}" y="${padding.top}" width="${probeW.toFixed(1)}" height="${innerH}" fill="transparent"><title>${escapeHtml(tickFmt(b.t))} — total ${tot} (${rows})</title></rect>`;
+  }).join('');
+
   return `
     <svg class="chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">
       <g class="grid">${hGrid.join('')}</g>
@@ -2041,6 +2040,7 @@ function stackedAreaChartSvg(buckets, opts) {
         <text x="4" y="${padding.top + innerH}">0</text>
       </g>
       ${areaPaths.join('')}
+      ${probeRects}
     </svg>
   `;
 }
@@ -2178,7 +2178,7 @@ function miniStackedAreaSvg(series, buckets) {
     const label = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
     return `
       <line x1="${xx}" y1="${padTop + innerH}" x2="${xx}" y2="${padTop + innerH + 4}" stroke="var(--border)"/>
-      ${showLabel ? `<text x="${xx}" y="${height - 6}" text-anchor="middle" font-size="9" class="axis-tick">${escapeHtml(label)}</text>` : ''}
+      ${showLabel ? `<text x="${xx}" y="${height - 6}" text-anchor="middle" font-size="9" fill="var(--text-secondary)" class="axis-tick">${escapeHtml(label)}</text>` : ''}
     `;
   }).join('');
 
@@ -2207,7 +2207,16 @@ function miniStackedAreaSvg(series, buckets) {
     }
     return `<path d="${parts.join(' ')} Z" fill="${s.color}" fill-opacity="0.55" stroke="${s.color}" stroke-opacity="0.4" stroke-width="0.5"/>`;
   }).join('');
-  return `<svg class="tokens-mini-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${miniTickMarkup}${paths}</svg>`;
+  // Hover probes: one transparent rect per bucket, time + per-category values.
+  // Same pattern as the main Tokens chart and Overview throughput.
+  const miniProbeW = buckets.length > 1 ? Math.max(6, (x(buckets[1].t) - x(buckets[0].t))) : innerW;
+  const miniFmtT = (t) => new Date(t).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+  const miniProbes = buckets.map((b, bi) => {
+    const rows = series.map((s) => `${s.label}: ${fmtTokens(s.points[bi]?.v || 0)}`).join(' · ');
+    const tot = fmtTokens(series.reduce((s, se) => s + (se.points[bi]?.v || 0), 0));
+    return `<rect x="${(x(b.t) - miniProbeW / 2).toFixed(1)}" y="${padTop}" width="${miniProbeW.toFixed(1)}" height="${innerH}" fill="transparent"><title>${escapeHtml(miniFmtT(b.t))} — total ${tot} (${rows})</title></rect>`;
+  }).join('');
+  return `<svg class="tokens-mini-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">${miniTickMarkup}${paths}${miniProbes}</svg>`;
 }
 
 function renderTokensKeySeries(buckets) {

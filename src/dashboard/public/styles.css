@@ -896,6 +896,8 @@ input, select, textarea {
   width: 100%;
   justify-content: flex-end;
 }
+.account-stat-bar .w5 { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); cursor: help; }
+.account-stat-bar .w5 .label { color: var(--text-faint); margin-right: 4px; }
 .account-sparklabel {
   font-size: 10px;
   color: var(--text-faint);
