@@ -630,6 +630,7 @@ let chartState = {
   series: { input: [], output: [], cacheRead: [], cacheWrite: [], reasoning: [] },
   maxPoints: 240,    // 4 minutes at 1s tick
   byKey: new Map(),  // keyAlias -> { tokens, fails: [{t, status}] }
+  lastTickMs: 0,
 };
 
 function pushChartPoint(entry) {
@@ -661,9 +662,18 @@ function pushChartPoint(entry) {
   }
 }
 
-function renderOverviewChart() {
+const CHART_RERENDER_MS = 5000;
+
+function renderOverviewChart(force = false) {
   const host = $('#overview-chart');
   if (!host) return;
+  // Throttle re-renders: the x-domain is data-driven, so re-rendering on
+  // every log tick shifts the whole chart. 5s cadence keeps recent activity
+  // live without moving history under the reader.
+  const now = Date.now();
+  if (!force && now - chartState.lastTickMs < CHART_RERENDER_MS && host.dataset.rendered === '1') return;
+  chartState.lastTickMs = now;
+  host.dataset.rendered = '1';
   const series = chartState.series;
   const all = [...series.input, ...series.output, ...series.cacheRead, ...series.cacheWrite, ...series.reasoning];
   if (all.length < 2) {
@@ -727,12 +737,16 @@ function overviewStackedAreaSvg(rawSeries, opts) {
   const x = (t) => padding.left + ((t - tMin) / spanMs) * innerW;
   const bucketW = (spanMs > 0 ? (bucketMs / spanMs) * innerW : 0);
 
-  // Calculate stacked values per bucket
+  // Calculate stacked values per bucket. Categories that carry no tokens in
+  // this window are skipped: a zero band adds no shape but its stroke would
+  // still draw a phantom line at another band's edge.
   const stackKeys = ['cacheRead', 'input', 'output', 'cacheWrite', 'reasoning'];
   const stackColors = ['var(--purple)', 'var(--accent)', 'var(--green)', 'var(--yellow)', 'var(--red)'];
+  const activeKeys = stackKeys.filter((k) => buckets.some((b) => (b[k] || 0) > 0));
+  const drawKeys = activeKeys.length ? activeKeys : stackKeys.slice(0, 1);
   const stackTops = buckets.map(() => 0);
   let vMax = 0;
-  for (const k of stackKeys) {
+  for (const k of drawKeys) {
     for (let i = 0; i < buckets.length; i++) {
       stackTops[i] += buckets[i][k];
     }
@@ -779,31 +793,36 @@ function overviewStackedAreaSvg(rawSeries, opts) {
 
   // Stacked area bands (from bottom to top). Bands are areas only — the single
   // outline is the neutral TOTAL line below, so no category color ever
-  // impersonates a series.
+  // impersonates a series. The polygon traces the upper edge forward and the
+  // lower edge BACKWARD per bucket (never a flat close to one point).
   function stackedAreas(key, colorIdx, prevTops) {
     if (buckets.length < 2) return '';
-    const pts = buckets.map((b, i) => {
+    const upper = buckets.map((b, i) => {
       const top = prevTops[i] + b[key];
       return { x: x(b.t), y: y(top) };
     });
-    const baseY = y(prevTops[0]);
-    const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ');
-    const close = 'L' + pts[pts.length - 1].x.toFixed(1) + ',' + baseY + ' Z';
+    const d = upper.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ')
+      + ' ' + buckets.map((b, i) => {
+        const j = buckets.length - 1 - i;
+        return 'L' + x(buckets[j].t).toFixed(1) + ',' + y(prevTops[j]).toFixed(1);
+      }).join(' ') + ' Z';
     // Update tops for next series
     for (let i = 0; i < prevTops.length; i++) prevTops[i] += buckets[i][key];
-    return `<path class="series-fill" fill="${stackColors[colorIdx]}" d="${d} ${close}" opacity="0.15"/>
-      <path class="series" stroke="${stackColors[colorIdx]}" fill="none" stroke-width="1" opacity="0.5" d="${d}"/>`;
+    const topD = upper.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ');
+    return `<path class="series-fill" fill="${stackColors[colorIdx]}" d="${d}" opacity="0.15"/>
+      <path class="series" stroke="${stackColors[colorIdx]}" fill="none" stroke-width="1" opacity="0.5" d="${topD}"/>`;
   }
 
   const stacks = [];
   const tops = buckets.map(() => 0);
-  for (let i = 0; i < stackKeys.length; i++) {
-    stacks.push(stackedAreas(stackKeys[i], i, tops));
+  const keyColorIdx = new Map(stackKeys.map((k, i) => [k, i]));
+  for (const k of drawKeys) {
+    stacks.push(stackedAreas(k, keyColorIdx.get(k), tops));
   }
   // Neutral total outline: the stack top across all categories.
   const totalPts = buckets.map((b, i) => {
     let acc = 0;
-    for (const k of stackKeys) acc += b[k];
+    for (const k of drawKeys) acc += b[k];
     return { x: x(b.t), y: y(acc) };
   });
   const totalD = totalPts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ');
@@ -821,10 +840,13 @@ function overviewStackedAreaSvg(rawSeries, opts) {
       </g>
       ${stacks.join('')}
       ${totalLine}
-      ${stackKeys.map((key, i) => `
+      ${drawKeys.map((key) => {
+        const i = keyColorIdx.get(key);
+        return `
         <rect x="${width - padding.right + 6}" y="${padding.top + i * 16}" width="10" height="10" rx="2" fill="${stackColors[i]}" opacity="0.85"/>
         <text x="${width - padding.right + 20}" y="${padding.top + i * 16 + 9}" font-size="10" fill="var(--text)" class="axis-tick">${key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}</text>
-      `).join('')}
+      `;
+      }).join('')}
     </svg>
   `;
 }
