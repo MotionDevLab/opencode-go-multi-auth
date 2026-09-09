@@ -501,19 +501,20 @@ const BREAKDOWN_WINDOWS = [
   { id: '30d', label: '30d' },
   { id: 'all', label: 'All-time' },
 ];
-let breakdownWindow = '30d';
+let breakdownWindow = '24h';
 
 function breakdownTotals() {
   const keys = state.keys || [];
   const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
   for (const k of keys) {
     // recentUsage.* are rolling windows from the usage log; quota.tokensBreakdown is lifetime.
+    // No fallbacks: a missing window renders as zeros, never as a different window's data.
     const u = breakdownWindow === 'all'
       ? (k.quota?.tokensBreakdown || {})
       : breakdownWindow === '7d'
         ? (k.recentUsage?.last7d || {})
         : breakdownWindow === '24h'
-          ? (k.recentUsage?.last24h || k.recentUsage?.last7d || {})
+          ? (k.recentUsage?.last24h || {})
           : (k.recentUsage?.last30d || {});
     totals.input += u.input || 0;
     totals.output += u.output || 0;
@@ -528,10 +529,12 @@ function renderTokenBreakdown() {
   const totals = breakdownTotals();
   const sum = totals.input + totals.output + totals.cacheRead + totals.cacheWrite + totals.reasoning;
   const pct = (v) => sum > 0 ? (v / sum) * 100 : 0;
+  const windowLabel = breakdownWindow === 'all' ? 'all-time' : `last ${breakdownWindow}`;
   $('#breakdown-body').innerHTML = `
     <div style="display: grid; gap: 10px;">
-      <div style="display: flex; gap: 6px; flex-wrap: wrap;" role="group" aria-label="Breakdown window">
+      <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;" role="group" aria-label="Breakdown window">
         ${BREAKDOWN_WINDOWS.map((w) => `<button class="btn btn-sm ${breakdownWindow === w.id ? 'btn-primary' : ''}" data-bw="${w.id}">${w.label}</button>`).join('')}
+        <span style="font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono);">${fmtTokens(sum)} tok in ${windowLabel}</span>
       </div>
       <div class="stacked-bar" title="Input / Output / Cache read / Cache write / Reasoning">
         <span class="seg-input" style="width:${pct(totals.input).toFixed(2)}%"></span>
@@ -774,7 +777,9 @@ function overviewStackedAreaSvg(rawSeries, opts) {
     `;
   }).join('');
 
-  // Stacked area paths (from bottom to top)
+  // Stacked area bands (from bottom to top). Bands are areas only — the single
+  // outline is the neutral TOTAL line below, so no category color ever
+  // impersonates a series.
   function stackedAreas(key, colorIdx, prevTops) {
     if (buckets.length < 2) return '';
     const pts = buckets.map((b, i) => {
@@ -787,7 +792,7 @@ function overviewStackedAreaSvg(rawSeries, opts) {
     // Update tops for next series
     for (let i = 0; i < prevTops.length; i++) prevTops[i] += buckets[i][key];
     return `<path class="series-fill" fill="${stackColors[colorIdx]}" d="${d} ${close}" opacity="0.15"/>
-      <path class="series" stroke="${stackColors[colorIdx]}" fill="none" stroke-width="1.5" d="${d}"/>`;
+      <path class="series" stroke="${stackColors[colorIdx]}" fill="none" stroke-width="1" opacity="0.5" d="${d}"/>`;
   }
 
   const stacks = [];
@@ -795,6 +800,16 @@ function overviewStackedAreaSvg(rawSeries, opts) {
   for (let i = 0; i < stackKeys.length; i++) {
     stacks.push(stackedAreas(stackKeys[i], i, tops));
   }
+  // Neutral total outline: the stack top across all categories.
+  const totalPts = buckets.map((b, i) => {
+    let acc = 0;
+    for (const k of stackKeys) acc += b[k];
+    return { x: x(b.t), y: y(acc) };
+  });
+  const totalD = totalPts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ');
+  const totalLine = buckets.length >= 2
+    ? `<path fill="none" stroke="var(--text)" stroke-width="1.5" opacity="0.8" d="${totalD}"><title>Total tokens per bucket</title></path>`
+    : '';
 
   return `
     <svg class="chart-svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="xMidYMid meet">
@@ -805,6 +820,7 @@ function overviewStackedAreaSvg(rawSeries, opts) {
         <text x="4" y="${padding.top + innerH}">0</text>
       </g>
       ${stacks.join('')}
+      ${totalLine}
       ${stackKeys.map((key, i) => `
         <rect x="${width - padding.right + 6}" y="${padding.top + i * 16}" width="10" height="10" rx="2" fill="${stackColors[i]}" opacity="0.85"/>
         <text x="${width - padding.right + 20}" y="${padding.top + i * 16 + 9}" font-size="10" fill="var(--text)" class="axis-tick">${key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}</text>

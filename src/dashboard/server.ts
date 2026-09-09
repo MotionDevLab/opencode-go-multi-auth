@@ -519,6 +519,7 @@ export class DashboardServer {
 
   private serializeKey(key: ApiKey) {
     const quota = this.quotaTracker.getUsageBreakdown(key.id)
+    const last24h = this.quotaTracker.getWindowedUsage(key.id, 24 * 60 * 60 * 1000)
     const last7d = this.quotaTracker.getWindowedUsage(key.id, 7 * 24 * 60 * 60 * 1000)
     const last30d = this.quotaTracker.getWindowedUsage(key.id, 30 * 24 * 60 * 60 * 1000)
     const calendarMonth = this.quotaTracker.getCalendarMonthUsage(key.id)
@@ -554,6 +555,7 @@ export class DashboardServer {
       lastQuotaError: key.lastQuotaError,
       quota,
       recentUsage: {
+        last24h,
         last7d,
         last30d,
         calendarMonth,
