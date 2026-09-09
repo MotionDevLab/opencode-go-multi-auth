@@ -31,8 +31,10 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 - **Git**: `mine`-only. Branch per feature; PR `mine → mine`.
 - **Tuning**: via `PUT /api/failover-tuning` (dashboard). Never hand-edit
   `~/.opencode/router-config.json` except snapshot/restore.
-- **Daemon**: Task Scheduler `Open Code Zen Router` (AtLogOn, hidden). Restart via
-  stop/start of that task — never run a second bare `node dist/bin.js` beside it.
+- **Daemon**: Task Scheduler `Open Code Zen Router` (AtLogOn). Visibility via
+  Settings → Daemon visibility (Hidden flag in task XML; `Set-ScheduledTask`
+  silently drops it, so writes go through export/modify/delete+recreate).
+  Restart via stop/start of that task — never run a second bare `node dist/bin.js` beside it.
 - **Probes**: `curl.exe` (not bare `curl` — PS alias trap). Logs: `GET /api/logs`.
 
 ## 4. Current tuning (failover)
