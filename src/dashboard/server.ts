@@ -356,6 +356,23 @@ export class DashboardServer {
       res.json({ ntfyUrl })
     })
 
+    this.app.get('/api/daemon-visibility', wrap(async (_req, res) => {
+      const { getDaemonHidden } = await import('../runtime/task-visibility.js')
+      const hidden = await getDaemonHidden()
+      res.json({ supported: process.platform === 'win32', hidden })
+    }))
+
+    this.app.put('/api/daemon-visibility', wrap(async (req, res) => {
+      const { hidden } = req.body ?? {}
+      if (typeof hidden !== 'boolean') {
+        res.status(400).json({ error: 'hidden must be a boolean' })
+        return
+      }
+      const { setDaemonHidden, getDaemonHidden } = await import('../runtime/task-visibility.js')
+      await setDaemonHidden(hidden)
+      res.json({ hidden: await getDaemonHidden() })
+    }))
+
     this.app.get('/api/models', async (_req, res) => {
       try {
         const proxy = `http://127.0.0.1:${this.proxyPort}`

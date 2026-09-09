@@ -121,6 +121,8 @@ const api = {
   removeKey(id) { return this.req(`/api/keys/${id}`, { method: 'DELETE' }); },
   config() { return this.req('/api/config'); },
   setConfig(payload) { return this.req('/api/config', { method: 'PUT', body: payload }); },
+  daemonVisibility() { return this.req('/api/daemon-visibility'); },
+  setDaemonVisibility(hidden) { return this.req('/api/daemon-visibility', { method: 'PUT', body: { hidden } }); },
   models() { return this.req('/api/models'); },
   visibleModels() { return this.req('/api/visible-models'); },
   zenProviderModels(provider) {
@@ -2558,6 +2560,47 @@ async function renderSettings() {
           toast('Failed to save: ' + (err instanceof Error ? err.message : String(err)), 'error');
         }
       };
+    }
+  }
+
+  const daemonCard = document.getElementById('settings-daemon');
+  if (daemonCard) {
+    const stateEl = document.getElementById('daemon-visibility-state');
+    const row = document.getElementById('daemon-visibility-row');
+    const paint = (hidden) => {
+      if (stateEl) stateEl.textContent = hidden === null ? 'unavailable' : (hidden ? 'Hidden (headless)' : 'Console window');
+      if (row) {
+        const hb = row.querySelector('[data-vis="hidden"]');
+        const cb = row.querySelector('[data-vis="console"]');
+        if (hb) hb.classList.toggle('btn-primary', hidden === true);
+        if (cb) cb.classList.toggle('btn-primary', hidden === false);
+      }
+    };
+    try {
+      const vis = await api.daemonVisibility();
+      if (!vis.supported) {
+        daemonCard.style.display = 'none';
+      } else {
+        paint(vis.hidden);
+        if (row) {
+          row.querySelectorAll('[data-vis]').forEach((btn) => {
+            btn.addEventListener('click', async () => {
+              const wantHidden = btn.dataset.vis === 'hidden';
+              try {
+                const out = await api.setDaemonVisibility(wantHidden);
+                paint(out.hidden);
+                toast(wantHidden
+                  ? 'Autostart will run headless. Restart the task (or reboot) to apply — the current window stays until then.'
+                  : 'Autostart will show a console. Restart the task (or reboot) to apply.', 'success');
+              } catch (err) {
+                toast('Failed to save: ' + (err instanceof Error ? err.message : String(err)), 'error');
+              }
+            });
+          });
+        }
+      }
+    } catch {
+      if (stateEl) stateEl.textContent = 'unavailable';
     }
   }
 
