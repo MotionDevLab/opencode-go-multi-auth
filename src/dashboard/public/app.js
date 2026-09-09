@@ -681,8 +681,14 @@ function renderOverviewChart(force = false) {
     return;
   }
   const strip = overviewFailStripSvg({ height: 26 });
-  host.innerHTML = overviewStackedAreaSvg(series, { width: 560, height: 196, padding: { top: 8, right: 12, bottom: 24, left: 40 } })
+  const svg = overviewStackedAreaSvg(series, { width: 560, height: 196, padding: { top: 8, right: 12, bottom: 24, left: 40 } });
+  // overviewStackedAreaSvg stashes its truthful legend HTML for the caller.
+  const legend = overviewStackedAreaSvg.lastLegend || '';
+  host.innerHTML = svg
+    + legend
     + `<div style="margin-top:6px;"><div style="font-size:10px;color:var(--text-secondary);font-family:var(--font-mono);margin-bottom:2px;">429 / 5xx per key (last 1h)</div>${strip}</div>`;
+  const staticLegend = host.parentElement ? host.parentElement.querySelector(':scope > .chart-legend') : null;
+  if (staticLegend && legend) staticLegend.style.display = 'none';
 }
 
 // One row per key: yellow tick = 429, red tick = 5xx. Answers "which key is burning".
@@ -819,15 +825,22 @@ function overviewStackedAreaSvg(rawSeries, opts) {
   for (const k of drawKeys) {
     stacks.push(stackedAreas(k, keyColorIdx.get(k), tops));
   }
-  // Neutral total outline: the stack top across all categories.
+  overviewStackedAreaSvg.lastLegend = overviewLegendSvg(drawKeys, keyColorIdx, stackColors, buckets);
+  // Neutral total outline: the stack top across all categories. Invisible fat
+  // hit path per vertex gives hover values without changing the picture.
   const totalPts = buckets.map((b, i) => {
     let acc = 0;
     for (const k of drawKeys) acc += b[k];
-    return { x: x(b.t), y: y(acc) };
+    return { x: x(b.t), y: y(acc), t: b.t, total: acc };
   });
   const totalD = totalPts.map((p, i) => (i === 0 ? 'M' : 'L') + p.x.toFixed(1) + ',' + p.y.toFixed(1)).join(' ');
+  const fmtBucketT = (t) => new Date(t).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
   const totalLine = buckets.length >= 2
-    ? `<path fill="none" stroke="var(--text)" stroke-width="1.5" opacity="0.8" d="${totalD}"><title>Total tokens per bucket</title></path>`
+    ? `<path fill="none" stroke="var(--text)" stroke-width="1.5" opacity="0.8" d="${totalD}"/>`
+      + totalPts.map((p) => {
+        const parts = drawKeys.map((k) => `${k.replace(/([A-Z])/g, ' $1')}: ${fmtTokens(buckets[totalPts.indexOf(p)][k] || 0)}`).join(' · ');
+        return `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="7" fill="transparent"><title>${fmtBucketT(p.t)} — total ${fmtTokens(p.total)} (${parts})</title></circle>`;
+      }).join('')
     : '';
 
   return `
@@ -840,15 +853,23 @@ function overviewStackedAreaSvg(rawSeries, opts) {
       </g>
       ${stacks.join('')}
       ${totalLine}
-      ${drawKeys.map((key) => {
-        const i = keyColorIdx.get(key);
-        return `
-        <rect x="${width - padding.right + 6}" y="${padding.top + i * 16}" width="10" height="10" rx="2" fill="${stackColors[i]}" opacity="0.85"/>
-        <text x="${width - padding.right + 20}" y="${padding.top + i * 16 + 9}" font-size="10" fill="var(--text)" class="axis-tick">${key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}</text>
-      `;
-      }).join('')}
     </svg>
   `;
+}
+
+// In-SVG legend: only drawn categories + Total, each with its window total.
+// Static HTML legend in index.html is hidden by renderOverviewChart; this one
+// can't lie because it's built from the same drawKeys as the bands.
+function overviewLegendSvg(drawKeys, keyColorIdx, stackColors, buckets) {
+  const totals = {};
+  for (const k of drawKeys) totals[k] = buckets.reduce((s, b) => s + (b[k] || 0), 0);
+  const items = drawKeys.map((k) => {
+    const i = keyColorIdx.get(k);
+    const label = k.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase());
+    return `<span><span class="swatch" style="background:${stackColors[i]};"></span>${escapeHtml(label)} ${fmtTokens(totals[k])}</span>`;
+  });
+  items.push(`<span style="color:var(--text);">— Total</span>`);
+  return `<div class="chart-legend" style="padding:4px 0 0;">${items.join('')}</div>`;
 }
 
 function sparklineSvg(values, opts = {}) {
