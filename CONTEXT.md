@@ -17,12 +17,14 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 |---|---|
 | `src/proxy/server.ts` | Request loop: key select → forward → classify status → failover/breaker |
 | `src/proxy/session-affinity.ts` | Sticky pins (session → key), 20-min TTL |
-| `src/proxy/quota-detector.ts` | Quota-429 vs burst-429 classification, Retry-After parsing |
+| `src/proxy/quota-detector.ts` | Quota-429 vs burst-429 classification, Retry-After parsing, `isLocalNetworkOutage` (DNS/no-route cause-chain classifier) |
 | `src/router/circuit-breaker.ts` | Consecutive + window trip, proactive self-cancel timer |
 | `src/router/types.ts` | `RouterConfig`, defaults, ranges, tuning validation |
 | `src/router/key-manager.ts` | Pool, priorities, cooldowns, display counters |
 | `src/dashboard/server.ts` | REST API (`/api/keys`, `/api/failover-tuning`, …) |
-| `src/dashboard/public/app.js` | Dashboard UI (cards, tuning panel, logs, Overview charts) |
+| `src/dashboard/public/app.js` | Dashboard UI (cards, tuning panel, logs, Overview charts, 5m readout, hover probes, tick strip, save feedback, donut err%) |
+| `src/runtime/task-visibility.ts` | Daemon Hidden-flag read/write via task XML round-trip (export → modify → in-place `schtasks /create /f` overwrite; per-task write mutex; 6s settle-and-retry confirm) |
+| `start-router.ps1` | Manual launcher: ALWAYS opens a visible titled console (`cmd /c start "Open Code Zen Router (manual)"`) — plain Start-Process inherits a hidden parent |
 | `src/storage/*` | `ConfigStore` (tuning), `SecureStore` (keys, encrypted), runtime state |
 
 ## 3. Iron rules
@@ -32,9 +34,22 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 - **Tuning**: via `PUT /api/failover-tuning` (dashboard). Never hand-edit
   `~/.opencode/router-config.json` except snapshot/restore.
 - **Daemon**: Task Scheduler `Open Code Zen Router` (AtLogOn). Visibility via
-  Settings → Daemon visibility (Hidden flag in task XML; `Set-ScheduledTask`
-  silently drops it, so writes go through export/modify/delete+recreate).
+  Settings → Daemon visibility (Hidden flag in task XML). `Set-ScheduledTask`
+  silently DROPS the Hidden element — writes go through export → modify →
+  in-place `schtasks /create /xml … /f` overwrite (no delete step; a failed
+  create leaves the original untouched). Overlapping PUTs serialize through a
+  per-task promise-chain mutex; confirmation reads settle-and-retry ~6s
+  (Scheduler flushes async). Absent `<Hidden>` tag = visible (Windows default).
   Restart via stop/start of that task — never run a second bare `node dist/bin.js` beside it.
+- **Manual vs autostart lanes**: the desktop shortcut (`start-router.ps1`) ALWAYS
+  opens a visible console — it is the diagnostics path. The Hidden/Console
+  toggle governs the scheduled autostart task ONLY. Shortcut launches Minimized
+  (kills the flash-hide-popup dance). Closing the manual console kills that
+  daemon instance; closing nothing in headless autostart.
+- **Probes**: `curl.exe` (not bare `curl` — PS alias trap). Logs: `GET /api/logs`.
+  schtasks XML declares UTF-16 but emits console-encoded bytes — decode by
+  content (UTF-8 first if `<Settings>` parses, else UTF-16LE), never trust the
+  declaration.
 - **Probes**: `curl.exe` (not bare `curl` — PS alias trap). Logs: `GET /api/logs`.
 
 ## 4. Current tuning (failover)
@@ -56,6 +71,7 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 - 🟡 quota-429/402 — `markExhausted` + cooldown + same-request failover.
 - ⚪ other 4xx (400/403/404 probes) — count-only, breaker-neutral.
 - ⚪ transport errors (`statusCode 0`, incl. client disconnect) — counted, never trip.
+- ⚪ local outage (DNS dead / no route: `ENOTFOUND`/`EAI_AGAIN`/`EAI_NONAME`/`ENETUNREACH`/`ENETDOWN`/`EHOSTUNREACH`/`EHOSTDOWN` at ANY cause-chain level; bare `fetch failed` deliberately excluded) — counted-only, zero breaker/failover burn, fail-fast `503 Local network unreachable` instead of cycling all keys. Owned by `isLocalNetworkOutage` (`quota-detector.ts`, synthetic suite 12/12).
 
 Breaker states: `closed` → `open` (skipped) → `half-open` (next request probes;
 success closes, failure re-trips). Self-cancel timer advances open → half-open
@@ -66,6 +82,11 @@ without traffic; re-trips re-arm it.
 `npm run typecheck` → Git Bash `npm run build` → restart task →
 `GET :18904/healthz` + `GET :18904/api/failover-tuning` → `:18905/zen/models`
 200 → one `(proxy)` turn, confirm 200 on the tape.
+Visibility work adds: `GET/PUT /api/daemon-visibility` round-trip both
+directions → `<Hidden>` present/valued in live `schtasks /query … /xml` →
+5-click race test (5×OK, final state == last click, triggers + principals
+intact). Manual-lane check: shortcut opens titled
+`Open Code Zen Router (manual)` console + healthz ok.
 
 ## 7. Roadmap
 
@@ -80,4 +101,6 @@ without traffic; re-trips re-arm it.
   tunnel, OpenCode app excluded via Per-App = ISP IP for native lane).
   Rejected: public scraping proxies (key theft + pre-burned + SSE-hostile).
 - Deferred: rolling 10-min error rate, burst-vs-quota split counter,
-  self-adapting thresholds, transport-error breaker counting.
+  self-adapting thresholds. Transport-error exclusion stands as designed
+  (count-only, never trips); the local-outage subset ships as its own error
+  type (`503 Local network unreachable` + legend chip), not as breaker input.
