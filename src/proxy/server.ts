@@ -275,8 +275,8 @@ export class ProxyServer {
             includeUsage = this.bodyRequestsUsage(body)
             prepared = this.prepareRequest(requestBody, targetPath)
             upstreamRes.body?.cancel().catch(() => {})
-            this.logStream.emit(this.logger, 'warn',
-              `Zen chat/completions 500 for "${requestModel}" - retrying via /responses on "${key.alias}"`, {
+            this.logStream.emit(this.logger, 'info',
+              `Zen chat/completions 500 for "${requestModel}" - first native attempt, translating via /responses on "${key.alias}" (one-time per model per boot)`, {
                 method: req.method,
                 path: targetPath,
                 statusCode: 500,
