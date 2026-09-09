@@ -82,8 +82,24 @@ function withHiddenFlag(xml: string, hidden: boolean): string {
  * recreate. Set-ScheduledTask silently DROPS the Hidden element, so it can
  * never be the writer. Own user task, InteractiveToken — no elevation needed.
  * Caller restarts the task (stop/start) for the change to take effect.
+ *
+ * Serialized through a module-level promise chain: overlapping PUTs (rapid
+ * clicks) execute strictly one-after-another, so concurrent writes can never
+ * interleave. Each write is a single in-place overwrite — a failed create
+ * leaves the original task untouched, so no rollback path is needed.
  */
-export async function setDaemonHidden(hidden: boolean, taskName = DAEMON_TASK_NAME): Promise<void> {
+const writeChains = new Map<string, Promise<void>>()
+
+export function setDaemonHidden(hidden: boolean, taskName = DAEMON_TASK_NAME): Promise<void> {
+  const prev = writeChains.get(taskName) ?? Promise.resolve()
+  const run = prev.then(() => setDaemonHiddenInner(hidden, taskName))
+  // Keep the chain alive across rejections; the caller still sees its error.
+  // Per-task so parallel toggles for different tasks never block each other.
+  writeChains.set(taskName, run.catch(() => {}))
+  return run
+}
+
+async function setDaemonHiddenInner(hidden: boolean, taskName: string): Promise<void> {
   if (!isWindows()) throw new Error('Daemon visibility toggle is Windows-only')
   let xml: string
   try {
@@ -92,17 +108,17 @@ export async function setDaemonHidden(hidden: boolean, taskName = DAEMON_TASK_NA
     throw new Error(`Could not read autostart task: ${err instanceof Error ? err.message : String(err)}`)
   }
   const updated = withHiddenFlag(xml, hidden)
-  const tmpFile = join(tmpdir(), `zen-router-task-${Date.now()}.xml`)
+  const tmpFile = join(tmpdir(), `zen-router-task-${Date.now()}-${Math.floor(Math.random() * 1e6)}.xml`)
   try {
     // Match what schtasks itself emits: UTF-16LE with BOM + CRLF newlines,
     // so /create accepts the file without re-encoding complaints.
+    // NOTE: /create ... /f OVERWRITES in place — no /delete step. An earlier
+    // delete+create design raced under rapid clicks (second delete landed
+    // while the first create was in flight → "cannot find the file" on 4/5
+    // writes). Overwrite is atomic from the caller's view, so no rollback
+    // path is needed: a failed create leaves the original task untouched.
     await fs.writeFile(tmpFile, '\uFEFF' + updated.replace(/\r?\n/g, '\r\n'), 'utf16le')
-    await execFileAsync('schtasks', ['/delete', '/tn', taskName, '/f'], { timeout: 15000 })
-    try {
-      await execFileAsync('schtasks', ['/create', '/tn', taskName, '/xml', tmpFile, '/f'], { timeout: 30000 })
-    } catch (createErr) {
-      throw new Error(`Task recreate failed (original was deleted): ${createErr instanceof Error ? createErr.message : String(createErr)}`)
-    }
+    await execFileAsync('schtasks', ['/create', '/tn', taskName, '/xml', tmpFile, '/f'], { timeout: 30000 })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     logToFile('error', 'daemon visibility write failed', { error: msg })
@@ -110,8 +126,18 @@ export async function setDaemonHidden(hidden: boolean, taskName = DAEMON_TASK_NA
   } finally {
     await fs.unlink(tmpFile).catch(() => {})
   }
-  // Confirm via the same read path the GET route uses; surfaces stale writes.
-  const confirmed = await getDaemonHidden(taskName)
+  // Confirm via the same read path the GET route uses, with a short settle
+  // window: schtasks /create returns before the Task Scheduler service has
+  // flushed the new XML to its store, so an immediate re-read can return the
+  // previous value (observed: write true→false→true in flight, first read
+  // still true). Retry ~6s before declaring a mismatch.
+  let confirmed: boolean | null = null
+  const deadline = Date.now() + 6000
+  for (;;) {
+    confirmed = await getDaemonHidden(taskName)
+    if (confirmed === hidden || Date.now() >= deadline) break
+    await new Promise((r) => setTimeout(r, 500))
+  }
   if (confirmed !== hidden) {
     throw new Error(`Task write accepted but still reads Hidden=${String(confirmed)}`)
   }

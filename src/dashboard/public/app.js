@@ -2583,9 +2583,12 @@ async function renderSettings() {
       } else {
         paint(vis.hidden);
         if (row) {
-          row.querySelectorAll('[data-vis]').forEach((btn) => {
+          const btns = [...row.querySelectorAll('[data-vis]')];
+          const setBusy = (busy) => btns.forEach((b) => { b.disabled = busy; });
+          btns.forEach((btn) => {
             btn.addEventListener('click', async () => {
               const wantHidden = btn.dataset.vis === 'hidden';
+              setBusy(true);
               try {
                 const out = await api.setDaemonVisibility(wantHidden);
                 paint(out.hidden);
@@ -2594,6 +2597,8 @@ async function renderSettings() {
                   : 'Autostart will show a console. Restart the task (or reboot) to apply.', 'success');
               } catch (err) {
                 toast('Failed to save: ' + (err instanceof Error ? err.message : String(err)), 'error');
+              } finally {
+                setBusy(false);
               }
             });
           });
