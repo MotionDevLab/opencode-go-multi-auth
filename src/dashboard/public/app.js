@@ -664,12 +664,12 @@ function renderOverviewChart() {
   const series = chartState.series;
   const all = [...series.input, ...series.output, ...series.cacheRead, ...series.cacheWrite, ...series.reasoning];
   if (all.length < 2) {
-    host.innerHTML = `<div style="height: 220px; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 12px; font-family: var(--font-mono);">Waiting for token activity…</div>`;
+    host.innerHTML = `<div style="height: 220px; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 12px; font-family: var(--font-mono);">Waiting for token activity…</div>`;
     return;
   }
   const strip = overviewFailStripSvg({ height: 26 });
   host.innerHTML = overviewStackedAreaSvg(series, { width: 560, height: 196, padding: { top: 8, right: 12, bottom: 24, left: 40 } })
-    + `<div style="margin-top:6px;"><div style="font-size:10px;color:var(--text-faint);font-family:var(--font-mono);margin-bottom:2px;">429 / 5xx per key (last 1h)</div>${strip}</div>`;
+    + `<div style="margin-top:6px;"><div style="font-size:10px;color:var(--text-secondary);font-family:var(--font-mono);margin-bottom:2px;">429 / 5xx per key (last 1h)</div>${strip}</div>`;
 }
 
 // One row per key: yellow tick = 429, red tick = 5xx. Answers "which key is burning".
@@ -679,7 +679,7 @@ function overviewFailStripSvg({ height }) {
     .map(([alias, slot]) => ({ alias, fails: slot.fails.filter((f) => f.t >= cutoff) }))
     .filter((r) => r.fails.length > 0)
     .slice(0, 6);
-  if (!rows.length) return `<div style="font-size:11px;color:var(--text-faint);">No 429/5xx in the last hour.</div>`;
+  if (!rows.length) return `<div style="font-size:11px;color:var(--text-secondary);">No 429/5xx in the last hour.</div>`;
   const W = 560, labelW = 110, rowH = Math.max(14, Math.floor((height || 26) / 1));
   const tMin = cutoff, tMax = Date.now();
   const span = Math.max(1, tMax - tMin);
@@ -770,7 +770,7 @@ function overviewStackedAreaSvg(rawSeries, opts) {
     const showLabel = i % labelStep === 0 || i === ticks.length - 1;
     return `
       <line x1="${xx}" y1="${padding.top}" x2="${xx}" y2="${padding.top + innerH}" class="grid-v"/>
-      ${showLabel ? `<text x="${xx}" y="${height - 6}" text-anchor="middle" font-size="9">${fmtTick(t)}</text>` : ''}
+      ${showLabel ? `<text x="${xx}" y="${height - 6}" text-anchor="middle" font-size="10" class="axis-tick">${fmtTick(t)}</text>` : ''}
     `;
   }).join('');
 
@@ -806,8 +806,8 @@ function overviewStackedAreaSvg(rawSeries, opts) {
       </g>
       ${stacks.join('')}
       ${stackKeys.map((key, i) => `
-        <rect x="${width - padding.right + 6}" y="${padding.top + i * 16}" width="10" height="10" rx="2" fill="${stackColors[i]}" opacity="0.6"/>
-        <text x="${width - padding.right + 20}" y="${padding.top + i * 16 + 9}" font-size="9" fill="var(--text-secondary)">${key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}</text>
+        <rect x="${width - padding.right + 6}" y="${padding.top + i * 16}" width="10" height="10" rx="2" fill="${stackColors[i]}" opacity="0.85"/>
+        <text x="${width - padding.right + 20}" y="${padding.top + i * 16 + 9}" font-size="10" fill="var(--text)" class="axis-tick">${key.replace(/([A-Z])/g, ' $1').replace(/^./, (s) => s.toUpperCase())}</text>
       `).join('')}
     </svg>
   `;
@@ -1865,7 +1865,7 @@ function renderTokensSharedChart(buckets, config) {
   const host = $('#tokens-shared-chart');
   if (!host) return;
   if (!buckets.length) {
-    host.innerHTML = `<div style="height: 220px; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 12px; font-family: var(--font-mono);">No log entries with token usage in this window.</div>`;
+    host.innerHTML = `<div style="height: 220px; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 12px; font-family: var(--font-mono);">No log entries with token usage in this window.</div>`;
     return;
   }
   if (buckets.length === 1) {
@@ -1939,7 +1939,7 @@ function stackedAreaChartSvg(buckets, opts) {
     const showLabel = i % labelStep === 0 || i === ticks.length - 1;
     return `
       <line x1="${xx}" y1="${padding.top}" x2="${xx}" y2="${padding.top + innerH}" class="grid-v"/>
-      ${showLabel ? `<text x="${xx}" y="${height - 8}" text-anchor="middle" font-size="10">${escapeHtml(tickFmt(t))}</text>` : ''}
+      ${showLabel ? `<text x="${xx}" y="${height - 8}" text-anchor="middle" font-size="10" class="axis-tick">${escapeHtml(tickFmt(t))}</text>` : ''}
     `;
   }).join('');
 
@@ -2119,7 +2119,7 @@ function miniStackedAreaSvg(series, buckets) {
     const label = d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
     return `
       <line x1="${xx}" y1="${padTop + innerH}" x2="${xx}" y2="${padTop + innerH + 4}" stroke="var(--border)"/>
-      ${showLabel ? `<text x="${xx}" y="${height - 6}" text-anchor="middle" font-size="8" fill="var(--text-faint)">${escapeHtml(label)}</text>` : ''}
+      ${showLabel ? `<text x="${xx}" y="${height - 6}" text-anchor="middle" font-size="9" class="axis-tick">${escapeHtml(label)}</text>` : ''}
     `;
   }).join('');
 
