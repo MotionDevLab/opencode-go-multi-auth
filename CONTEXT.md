@@ -22,7 +22,7 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 | `src/router/types.ts` | `RouterConfig`, defaults, ranges, tuning validation |
 | `src/router/key-manager.ts` | Pool, priorities, cooldowns, display counters |
 | `src/dashboard/server.ts` | REST API (`/api/keys`, `/api/failover-tuning`, …) |
-| `src/dashboard/public/app.js` | Dashboard UI (cards, tuning panel, logs) |
+| `src/dashboard/public/app.js` | Dashboard UI (cards, tuning panel, logs, Overview charts) |
 | `src/storage/*` | `ConfigStore` (tuning), `SecureStore` (keys, encrypted), runtime state |
 
 ## 3. Iron rules
