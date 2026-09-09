@@ -430,14 +430,19 @@ function renderOverviewKpis() {
   const s = state.summary || {};
   const kpis = [
     { label: 'Enabled keys', value: s.enabledKeys ?? 0, accent: 'accent' },
-    { label: 'Active', value: s.activeKeys ?? 0, accent: 'green' },
+    {
+      label: 'Servable now',
+      value: s.effectiveAvailable ?? 0,
+      accent: (s.effectiveAvailable ?? 0) === 0 ? 'red' : (s.effectiveAvailable ?? 0) < (s.enabledKeys ?? 0) ? 'yellow' : 'green',
+      title: 'Enabled + active + breaker-closed. When this hits 0 the next turn 503s — drain/rest is the move, not retries.',
+    },
     { label: 'Cooldown', value: s.cooldownKeys ?? 0, accent: s.cooldownKeys ? 'yellow' : '' },
     { label: 'Open breakers', value: s.openBreakers ?? 0, accent: (s.openBreakers ?? 0) > 0 ? 'yellow' : '' },
     { label: 'Requests', value: fmtTokens(s.totalRequests ?? 0) },
     { label: 'Quota errors', value: fmtNumber(s.quotaErrorCount ?? 0), accent: (s.quotaErrorCount ?? 0) > 0 ? 'yellow' : '' },
   ];
   $('#overview-kpis').innerHTML = kpis.map((k) => `
-    <div class="kpi">
+    <div class="kpi"${k.title ? ` title="${escapeHtml(k.title)}"` : ''}>
       <span class="kpi-label">${escapeHtml(k.label)}</span>
       <span class="kpi-value ${k.accent || ''}">${escapeHtml(String(k.value))}</span>
     </div>
@@ -457,12 +462,11 @@ function renderQuotaErrors() {
 
   const body = $('#recon-body');
   if (rows.length === 0) {
+    // Healthy state: collapse the billboard to one line, keep the explainer
+    // one hover away. Frees half a row for the throughput chart.
     body.innerHTML = `
-      <div class="empty-state" style="margin: 16px;">
-        <strong>No quota errors</strong>
-        The router will only cooldown a key when the upstream returns 402 or 429 with a quota signal.
-        Healthy state: no rows here.
-      </div>
+      <div style="padding: 10px 16px; font-size: 12px; color: var(--text-secondary);"
+        title="The router only cools down a key on upstream 402 or quota-marked 429.">✓ No quota errors</div>
     `;
     return;
   }
@@ -491,20 +495,44 @@ function renderQuotaErrors() {
   }).join('');
 }
 
+const BREAKDOWN_WINDOWS = [
+  { id: '24h', label: '24h' },
+  { id: '7d', label: '7d' },
+  { id: '30d', label: '30d' },
+  { id: 'all', label: 'All-time' },
+];
+let breakdownWindow = '30d';
+
+function breakdownTotals() {
+  const keys = state.keys || [];
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 };
+  for (const k of keys) {
+    // recentUsage.* are rolling windows from the usage log; quota.tokensBreakdown is lifetime.
+    const u = breakdownWindow === 'all'
+      ? (k.quota?.tokensBreakdown || {})
+      : breakdownWindow === '7d'
+        ? (k.recentUsage?.last7d || {})
+        : breakdownWindow === '24h'
+          ? (k.recentUsage?.last24h || k.recentUsage?.last7d || {})
+          : (k.recentUsage?.last30d || {});
+    totals.input += u.input || 0;
+    totals.output += u.output || 0;
+    totals.cacheRead += u.cacheRead || 0;
+    totals.cacheWrite += u.cacheWrite || 0;
+    totals.reasoning += u.reasoning || 0;
+  }
+  return totals;
+}
+
 function renderTokenBreakdown() {
-  const totals = (state.keys || []).reduce((acc, k) => {
-    const b = k.quota?.tokensBreakdown || {};
-    acc.input += b.input || 0;
-    acc.output += b.output || 0;
-    acc.cacheRead += b.cacheRead || 0;
-    acc.cacheWrite += b.cacheWrite || 0;
-    acc.reasoning += b.reasoning || 0;
-    return acc;
-  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+  const totals = breakdownTotals();
   const sum = totals.input + totals.output + totals.cacheRead + totals.cacheWrite + totals.reasoning;
   const pct = (v) => sum > 0 ? (v / sum) * 100 : 0;
   $('#breakdown-body').innerHTML = `
     <div style="display: grid; gap: 10px;">
+      <div style="display: flex; gap: 6px; flex-wrap: wrap;" role="group" aria-label="Breakdown window">
+        ${BREAKDOWN_WINDOWS.map((w) => `<button class="btn btn-sm ${breakdownWindow === w.id ? 'btn-primary' : ''}" data-bw="${w.id}">${w.label}</button>`).join('')}
+      </div>
       <div class="stacked-bar" title="Input / Output / Cache read / Cache write / Reasoning">
         <span class="seg-input" style="width:${pct(totals.input).toFixed(2)}%"></span>
         <span class="seg-output" style="width:${pct(totals.output).toFixed(2)}%"></span>
@@ -521,43 +549,17 @@ function renderTokenBreakdown() {
       </div>
     </div>
   `;
+  $$('#breakdown-body [data-bw]').forEach((el) => {
+    el.addEventListener('click', () => {
+      breakdownWindow = el.dataset.bw;
+      renderTokenBreakdown();
+    });
+  });
 }
 
 function renderToken30d() {
-  const host = $('#overview-30d');
-  if (!host) return;
-  const keys = state.keys || [];
-  const totals = keys.reduce((acc, k) => {
-    const u = k.recentUsage?.last30d || {};
-    acc.input += u.input || 0;
-    acc.output += u.output || 0;
-    acc.cacheRead += u.cacheRead || 0;
-    acc.cacheWrite += u.cacheWrite || 0;
-    acc.reasoning += u.reasoning || 0;
-    acc.totalTokens += u.totalTokens || 0;
-    acc.cost += u.cost || 0;
-    return acc;
-  }, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 0, cost: 0 });
-  const sum = totals.input + totals.output + totals.cacheRead + totals.cacheWrite + totals.reasoning;
-  const pct = (v) => sum > 0 ? (v / sum) * 100 : 0;
-  host.innerHTML = `
-    <div style="display: grid; gap: 10px;">
-      <div class="stacked-bar" title="Input / Output / Cache read / Cache write / Reasoning">
-        <span class="seg-input" style="width:${pct(totals.input).toFixed(2)}%"></span>
-        <span class="seg-output" style="width:${pct(totals.output).toFixed(2)}%"></span>
-        <span class="seg-cr" style="width:${pct(totals.cacheRead).toFixed(2)}%"></span>
-        <span class="seg-cw" style="width:${pct(totals.cacheWrite).toFixed(2)}%"></span>
-        <span class="seg-r" style="width:${pct(totals.reasoning).toFixed(2)}%"></span>
-      </div>
-      <div class="chart-legend" style="padding: 0;">
-        <span><span class="swatch" style="background: var(--accent);"></span>Input ${fmtTokens(totals.input)}</span>
-        <span><span class="swatch" style="background: var(--green);"></span>Output ${fmtTokens(totals.output)}</span>
-        <span><span class="swatch" style="background: var(--purple);"></span>Cache read ${fmtTokens(totals.cacheRead)}</span>
-        <span><span class="swatch" style="background: var(--yellow);"></span>Cache write ${fmtTokens(totals.cacheWrite)}</span>
-        <span><span class="swatch" style="background: var(--red);"></span>Reasoning ${fmtTokens(totals.reasoning)}</span>
-      </div>
-    </div>
-  `;
+  // Folded into renderTokenBreakdown (window toggle covers 30d). Kept as a
+  // no-op so renderOverview() call sites don't break; the card was removed.
 }
 
 const DONUT_COLORS = ['var(--accent)', 'var(--green)', 'var(--purple)', 'var(--yellow)', 'var(--red)', '#f9a825', '#7c4dff', '#00bfa5', '#ff6d00', '#536dfe', 'var(--text-faint)'];
@@ -576,7 +578,11 @@ function renderModelDonut() {
     }
   }
   const sorted = [...byModel.entries()]
-    .map(([model, data]) => ({ model, total: data.input + data.output + data.cacheRead + data.cacheWrite + data.reasoning }))
+    .map(([model, data]) => ({
+      model,
+      total: data.input + data.output + data.cacheRead + data.cacheWrite + data.reasoning,
+      errRate: data.requests > 0 ? (data.errors || 0) / data.requests : 0,
+    }))
     .sort((a, b) => b.total - a.total);
   if (!sorted.length) { host.innerHTML = '<div class="empty-state">No token data in the last 24h.</div>'; return; }
   const top = sorted.slice(0, 8);
@@ -594,12 +600,14 @@ function renderModelDonut() {
     offset += len;
     return seg;
   }).join('');
-  const legend = top.map((m, i) =>
-    `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--text-secondary);">
+  const legend = top.map((m, i) => {
+    const errColor = m.errRate < 0.05 ? 'var(--green)' : m.errRate < 0.20 ? 'var(--yellow)' : 'var(--red)';
+    const errText = `<span style="color:${errColor};" title="Share of 24h requests for this model that ended 4xx/5xx or transport-failed.">err ${(m.errRate * 100).toFixed(0)}%</span>`;
+    return `<span style="display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:11px;color:var(--text-secondary);">
       <span style="width:8px;height:8px;border-radius:2px;background:${DONUT_COLORS[i % DONUT_COLORS.length]};flex-shrink:0;"></span>
-      ${escapeHtml(m.model)} <strong style="color:var(--text);">${(m.total / grandTotal * 100).toFixed(1)}%</strong>
-    </span>`
-  ).join('');
+      ${escapeHtml(m.model)} <strong style="color:var(--text);">${(m.total / grandTotal * 100).toFixed(1)}%</strong> ${errText}
+    </span>`;
+  }).join('');
   host.innerHTML = `
     <div style="display:flex;align-items:center;gap:16px;padding:8px 0;">
       <svg width="120" height="120" viewBox="0 0 120 120" style="flex-shrink:0;">
@@ -618,6 +626,7 @@ function renderModelDonut() {
 let chartState = {
   series: { input: [], output: [], cacheRead: [], cacheWrite: [], reasoning: [] },
   maxPoints: 240,    // 4 minutes at 1s tick
+  byKey: new Map(),  // keyAlias -> { tokens, fails: [{t, status}] }
 };
 
 function pushChartPoint(entry) {
@@ -637,6 +646,16 @@ function pushChartPoint(entry) {
       chartState.series[key] = chartState.series[key].slice(-chartState.maxPoints);
     }
   }
+  // Per-key thread for small-multiples + failure tick strip.
+  const alias = meta.keyAlias || '(unknown)';
+  let slot = chartState.byKey.get(alias);
+  if (!slot) { slot = { tokens: 0, fails: [] }; chartState.byKey.set(alias, slot); }
+  slot.tokens += (t.input || 0) + (t.output || 0) + (t.cacheRead || 0);
+  const sc = meta.statusCode;
+  if (sc === 429 || (typeof sc === 'number' && sc >= 500)) {
+    slot.fails.push({ t: ts, status: sc });
+    slot.fails = slot.fails.filter((f) => f.t >= cutoff).slice(-120);
+  }
 }
 
 function renderOverviewChart() {
@@ -648,7 +667,31 @@ function renderOverviewChart() {
     host.innerHTML = `<div style="height: 220px; display: flex; align-items: center; justify-content: center; color: var(--text-faint); font-size: 12px; font-family: var(--font-mono);">Waiting for token activity…</div>`;
     return;
   }
-  host.innerHTML = overviewStackedAreaSvg(series, { width: 560, height: 220, padding: { top: 8, right: 12, bottom: 24, left: 40 } });
+  const strip = overviewFailStripSvg({ height: 26 });
+  host.innerHTML = overviewStackedAreaSvg(series, { width: 560, height: 196, padding: { top: 8, right: 12, bottom: 24, left: 40 } })
+    + `<div style="margin-top:6px;"><div style="font-size:10px;color:var(--text-faint);font-family:var(--font-mono);margin-bottom:2px;">429 / 5xx per key (last 1h)</div>${strip}</div>`;
+}
+
+// One row per key: yellow tick = 429, red tick = 5xx. Answers "which key is burning".
+function overviewFailStripSvg({ height }) {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  const rows = [...chartState.byKey.entries()]
+    .map(([alias, slot]) => ({ alias, fails: slot.fails.filter((f) => f.t >= cutoff) }))
+    .filter((r) => r.fails.length > 0)
+    .slice(0, 6);
+  if (!rows.length) return `<div style="font-size:11px;color:var(--text-faint);">No 429/5xx in the last hour.</div>`;
+  const W = 560, labelW = 110, rowH = Math.max(14, Math.floor((height || 26) / 1));
+  const tMin = cutoff, tMax = Date.now();
+  const span = Math.max(1, tMax - tMin);
+  const x = (t) => labelW + ((t - tMin) / span) * (W - labelW - 8);
+  return `<svg width="100%" viewBox="0 0 ${W} ${rows.length * rowH + 4}" style="display:block;">` + rows.map((r, i) => {
+    const y = i * rowH + rowH / 2;
+    const ticks = r.fails.map((f) => {
+      const color = f.status === 429 ? 'var(--yellow)' : 'var(--red)';
+      return `<line x1="${x(f.t).toFixed(1)}" y1="${(y - 4).toFixed(1)}" x2="${x(f.t).toFixed(1)}" y2="${(y + 4).toFixed(1)}" stroke="${color}" stroke-width="2"><title>${escapeHtml(r.alias)} · HTTP ${f.status} · ${new Date(f.t).toLocaleTimeString()}</title></line>`;
+    }).join('');
+    return `<text x="0" y="${(y + 3).toFixed(1)}" font-size="10" fill="var(--text-secondary)" font-family="var(--font-mono)">${escapeHtml(r.alias.slice(0, 14))}</text>${ticks}`;
+  }).join('') + `</svg>`;
 }
 
 const scheduleOverviewChart = rAFThrottle(() => {
@@ -1271,17 +1314,32 @@ async function renderFailoverTuning() {
           </div>
           <div style="display: flex; gap: 16px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
             <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Count burst-429s toward the breaker so the NEXT request fails over. Off = pre-tuning behavior: 429s never trip, keys cook.">
-              <input type="checkbox" id="ft-burst" ${t.burstFailoverEnabled ? 'checked' : ''}> Burst-failover
+              <input type="checkbox" class="ft-input" id="ft-burst" ${t.burstFailoverEnabled ? 'checked' : ''}> Burst-failover
             </label>
             <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header (clamped between Recovery and the cap) as the exile length instead of the flat Recovery value.">
-              <input type="checkbox" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
+              <input type="checkbox" class="ft-input" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
             </label>
             <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
+            <span id="ft-dirty" class="ft-dirty" hidden>● unsaved changes</span>
           </div>
         </div>
       </div>
     </div>
   `;
+  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-burst', '#ft-retry-after'];
+  const ftSnapshot = () => ftFields.map((id) => {
+    const el = $(id);
+    return el && 'checked' in el && el.type === 'checkbox' ? String(el.checked) : String(el ? el.value : '');
+  }).join('|');
+  const ftBaseline = ftSnapshot();
+  const ftMarkDirty = () => {
+    const dirty = $('#ft-dirty');
+    if (dirty) dirty.hidden = ftSnapshot() === ftBaseline;
+  };
+  ftFields.forEach((id) => {
+    const el = $(id);
+    if (el) el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', ftMarkDirty);
+  });
   $('#ft-save').addEventListener('click', async () => {
     const num = (id) => Number($(id).value);
     const payload = {
@@ -1294,9 +1352,23 @@ async function renderFailoverTuning() {
       burstFailoverEnabled: $('#ft-burst').checked,
       honorRetryAfter: $('#ft-retry-after').checked,
     };
+    const diffBits = [];
+    const prev = state.failoverTuning || {};
+    const fmtS = (ms) => `${Math.round(ms / 1000)}s`;
+    if (payload.circuitBreakerThreshold !== prev.circuitBreakerThreshold) diffBits.push(`Streak ${prev.circuitBreakerThreshold}→${payload.circuitBreakerThreshold}`);
+    if (payload.windowFailures !== prev.windowFailures || payload.windowSeconds !== prev.windowSeconds) diffBits.push(`Window ${prev.windowFailures}/${prev.windowSeconds}s→${payload.windowFailures}/${payload.windowSeconds}s`);
+    if (payload.circuitBreakerRecoveryMs !== prev.circuitBreakerRecoveryMs) diffBits.push(`Recovery ${fmtS(prev.circuitBreakerRecoveryMs)}→${fmtS(payload.circuitBreakerRecoveryMs)}`);
+    if (payload.breakerSelfCancelMs !== prev.breakerSelfCancelMs) diffBits.push(`Self-cancel ${fmtS(prev.breakerSelfCancelMs)}→${fmtS(payload.breakerSelfCancelMs)}`);
+    if (payload.retryAfterCapMs !== prev.retryAfterCapMs) diffBits.push(`Cap ${fmtS(prev.retryAfterCapMs)}→${fmtS(payload.retryAfterCapMs)}`);
+    if (payload.burstFailoverEnabled !== prev.burstFailoverEnabled) diffBits.push(`Burst-failover ${payload.burstFailoverEnabled ? 'on' : 'off'}`);
+    if (payload.honorRetryAfter !== prev.honorRetryAfter) diffBits.push(`Honor Retry-After ${payload.honorRetryAfter ? 'on' : 'off'}`);
+    if (diffBits.length === 0) {
+      toast('Already at these values — nothing saved', 'info');
+      return;
+    }
     try {
       state.failoverTuning = await api.setFailoverTuning(payload);
-      toast('Failover tuning saved', 'success');
+      toast(`Failover tuning saved: ${diffBits.join(' · ')}`, 'success');
       renderFailoverTuning();
     } catch (err) {
       toast(err.message, 'error');
@@ -1756,8 +1828,11 @@ function aggregateAll(entries) {
     }
     if (!m.model) continue;
     let mb = byModel.get(m.model);
-    if (!mb) { mb = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, requests: 0, cost: 0 }; byModel.set(m.model, mb); }
+    if (!mb) { mb = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, requests: 0, cost: 0, errors: 0 }; byModel.set(m.model, mb); }
     mb.requests += 1;
+    // Error = upstream 4xx/5xx or transport failure (statusCode 0). Success =
+    // 2xx only. Drives the donut's per-model error-rate column (spill predictor).
+    if (typeof m.statusCode !== 'number' || m.statusCode >= 400) mb.errors += 1;
     if (t) {
       mb.input += t.input || 0;
       mb.output += t.output || 0;

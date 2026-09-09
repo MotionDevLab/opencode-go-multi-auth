@@ -987,6 +987,12 @@ input, select, textarea {
   cursor: help;
 }
 
+.ft-dirty {
+  font-size: 12px;
+  color: var(--yellow);
+  font-weight: 600;
+}
+
 .account-replace-popover {
   position: absolute;
   z-index: 30;
