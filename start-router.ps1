@@ -8,6 +8,8 @@ function Test-Healthy {
   } catch { return $false }
 }
 
+
+
 if (Test-Healthy) {
   Write-Output "Router daemon already healthy."
 } else {
@@ -20,7 +22,12 @@ if (Test-Healthy) {
     } catch { Remove-Item $pidFile -Force -ErrorAction SilentlyContinue }
   }
   Write-Output "Starting router daemon..."
-  Start-Process -FilePath "node" -ArgumentList "dist\bin.js" -WorkingDirectory $daemonDir -WindowStyle Hidden
+  # Manual launch is ALWAYS a visible console with live daemon output (by
+  # design: the shortcut is the diagnostics path). The Hidden/Console toggle
+  # governs only the scheduled autostart task. Plain Start-Process inherits
+  # the hidden parent's window state, so use cmd /c start to force a new
+  # visible console window for the daemon.
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/c", "start", '"Open Code Zen Router (manual)"', "/d", "`"$daemonDir`"", "node", "dist\bin.js" -WorkingDirectory $daemonDir
   $deadline = (Get-Date).AddSeconds(30)
   while (-not (Test-Healthy) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
   if (Test-Healthy) { Write-Output "Router daemon started." }

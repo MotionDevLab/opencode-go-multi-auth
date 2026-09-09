@@ -372,7 +372,7 @@
               Controls the console window of the <code style="font-family: var(--font-mono);">Open Code Zen Router</code> autostart task.
               <strong>Hidden</strong> runs headless — no window to close by accident; use the dashboard Logs page for diagnostics.
               <strong>Console</strong> shows a PowerShell window with live daemon output; closing it stops the proxy until the next logon or manual start.
-              Takes effect after the task restarts (stop + start it, or reboot). Non-Windows platforms don't use Task Scheduler — the toggle is hidden there.
+              Controls the scheduled autostart task only. The desktop shortcut always opens a visible console — it is the manual/diagnostics path. Takes effect after the task restarts (stop + start it, or reboot). Non-Windows platforms don't use Task Scheduler — the toggle is hidden there.
             </p>
             <div style="display: flex; gap: 8px; align-items: center;" id="daemon-visibility-row">
               <button class="btn btn-sm" data-vis="hidden">Hidden</button>
