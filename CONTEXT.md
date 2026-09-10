@@ -23,7 +23,7 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 | `src/router/key-manager.ts` | Pool, priorities, cooldowns, display counters |
 | `src/dashboard/server.ts` | REST API (`/api/keys`, `/api/failover-tuning`, …) |
 | `src/dashboard/public/app.js` | Dashboard UI (cards, tuning panel, logs, Overview charts, 5m readout, hover probes, tick strip, save feedback, donut err%) |
-| `src/runtime/task-visibility.ts` | Daemon Hidden-flag read/write via task XML round-trip (export → modify → in-place `schtasks /create /f` overwrite; per-task write mutex; 6s settle-and-retry confirm) |
+| `src/runtime/task-visibility.ts` | Daemon launch-lane read/write via task XML round-trip (export → modify → in-place `schtasks /create /f` overwrite; per-task write mutex; 6s settle-and-retry confirm). Hidden lane = `wscript.exe scripts/start-router-hidden.vbs` (windowless, `OPENCODE_ROUTER_PLUGIN_MODE=1`); Console lane = bare `node.exe dist\bin.js`. The legacy `<Hidden>` flag only hides the task in the Scheduler UI and is synced to match the lane |
 | `start-router.ps1` | Manual launcher: ALWAYS opens a visible titled console (`cmd /c start "Open Code Zen Router (manual)"`) — plain Start-Process inherits a hidden parent |
 | `src/storage/*` | `ConfigStore` (tuning), `SecureStore` (keys, encrypted), runtime state |
 
@@ -34,7 +34,11 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 - **Tuning**: via `PUT /api/failover-tuning` (dashboard). Never hand-edit
   `~/.opencode/router-config.json` except snapshot/restore.
 - **Daemon**: Task Scheduler `Open Code Zen Router` (AtLogOn). Visibility via
-  Settings → Daemon visibility (Hidden flag in task XML). `Set-ScheduledTask`
+  Settings → Daemon visibility, which switches the task ACTION (hidden lane:
+  `wscript.exe` + `scripts/start-router-hidden.vbs`, windowless with plugin
+  mode on; console lane: bare `node.exe dist\bin.js`). The task `<Hidden>`
+  flag only hides the task in the Scheduler UI (Microsoft docs) — it is
+  synced to match the lane, never the mechanism. `Set-ScheduledTask`
   silently DROPS the Hidden element — writes go through export → modify →
   in-place `schtasks /create /xml … /f` overwrite (no delete step; a failed
   create leaves the original untouched). Overlapping PUTs serialize through a
@@ -50,7 +54,9 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
   schtasks XML declares UTF-16 but emits console-encoded bytes — decode by
   content (UTF-8 first if `<Settings>` parses, else UTF-16LE), never trust the
   declaration.
-- **Probes**: `curl.exe` (not bare `curl` — PS alias trap). Logs: `GET /api/logs`.
+- **Task Manager check**: Details tab → enable the Command line column →
+  match `node.exe …\dist\bin.js` against `~/.opencode/router.pid`. Headless
+  (hidden lane) = no `conhost.exe` child under that PID.
 
 ## 4. Current tuning (failover)
 
@@ -83,9 +89,10 @@ without traffic; re-trips re-arm it.
 `GET :18904/healthz` + `GET :18904/api/failover-tuning` → `:18905/zen/models`
 200 → one `(proxy)` turn, confirm 200 on the tape.
 Visibility work adds: `GET/PUT /api/daemon-visibility` round-trip both
-directions → `<Hidden>` present/valued in live `schtasks /query … /xml` →
-5-click race test (5×OK, final state == last click, triggers + principals
-intact). Manual-lane check: shortcut opens titled
+directions → live `schtasks /query … /xml` shows the `wscript.exe` +
+`start-router-hidden.vbs` action (hidden lane) or `node.exe dist\bin.js`
+(console lane), `<Hidden>` synced, triggers + principals intact →
+5-click race test (5×OK, final state == last click). Manual-lane check: shortcut opens titled
 `Open Code Zen Router (manual)` console + healthz ok.
 
 ## 7. Roadmap
