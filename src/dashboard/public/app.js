@@ -2568,7 +2568,7 @@ async function renderSettings() {
     const stateEl = document.getElementById('daemon-visibility-state');
     const row = document.getElementById('daemon-visibility-row');
     const paint = (hidden) => {
-      if (stateEl) stateEl.textContent = hidden === null ? 'unavailable' : (hidden ? 'Hidden (headless)' : 'Console window');
+      if (stateEl) stateEl.textContent = hidden === null ? 'unavailable' : (hidden ? 'Hidden (headless launch)' : 'Console window');
       if (row) {
         const hb = row.querySelector('[data-vis="hidden"]');
         const cb = row.querySelector('[data-vis="console"]');

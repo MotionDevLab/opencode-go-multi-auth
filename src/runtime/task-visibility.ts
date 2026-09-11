@@ -9,6 +9,54 @@ const execFileAsync = promisify(execFile)
 
 export const DAEMON_TASK_NAME = 'Open Code Zen Router'
 
+export interface LaunchPaths {
+  vbsPath: string
+  nodePath: string
+  workDir: string
+}
+
+/**
+ * Which lane the task action launches. wscript.exe + the hidden VBS reads
+ * hidden (headless console); a bare node.exe action reads console (visible).
+ * Anything else is null (unknown — leave the action untouched).
+ */
+export function detectLaunchMode(xml: string): boolean | null {
+  const action = xml.match(/<Actions[\s\S]*?<\/Actions>/i)?.[0]
+  if (!action) return null
+  if (/wscript\.exe/i.test(action) && /start-router-hidden\.vbs/i.test(action)) return true
+  if (/<Command>[\s\S]*?node(\.exe)?[\s\S]*?<\/Command>/i.test(action)) return false
+  return null
+}
+
+function buildExecBlock(opts: { hidden: boolean } & LaunchPaths): string {
+  if (opts.hidden) {
+    return [
+      '      <Command>C:\\Windows\\System32\\wscript.exe</Command>',
+      `      <Arguments>"${opts.vbsPath}"</Arguments>`,
+      `      <WorkingDirectory>${opts.workDir}</WorkingDirectory>`,
+    ].join('\r\n')
+  }
+  return [
+    `      <Command>${opts.nodePath}</Command>`,
+    '      <Arguments>dist\\bin.js</Arguments>',
+    `      <WorkingDirectory>${opts.workDir}</WorkingDirectory>`,
+  ].join('\r\n')
+}
+
+/**
+ * Rewrite the task action to the hidden (wscript + VBS) or console
+ * (bare node.exe) lane, and sync the legacy <Hidden> flag to match.
+ * Actions that are neither lane are left untouched — only the flag flips.
+ */
+export function withLaunchAction(xml: string, opts: { hidden: boolean } & LaunchPaths): string {
+  const mode = detectLaunchMode(xml)
+  const updated =
+    mode === null
+      ? xml
+      : xml.replace(/<Exec>[\s\S]*?<\/Exec>/i, `<Exec>\r\n${buildExecBlock(opts)}\r\n    </Exec>`)
+  return withHiddenFlag(updated, opts.hidden)
+}
+
 function isWindows(): boolean {
   return process.platform === 'win32'
 }
@@ -48,11 +96,34 @@ async function readTaskXml(taskName: string): Promise<string> {
   return decodeTaskOutput(stdout)
 }
 
-/** Current Hidden flag of the autostart task; absent tag reads as false (visible). */
+/**
+ * Launch paths for the action switch. VBS path is derived from the repo
+ * root: prefer the existing WorkingDirectory in the task XML, else fall
+ * back to cwd (dashboard runs with the repo as its working directory).
+ */
+export function resolveLaunchPaths(xml: string): LaunchPaths {
+  const workDir =
+    xml.match(/<WorkingDirectory>([\s\S]*?)<\/WorkingDirectory>/i)?.[1]?.trim().replace(/\r?\n/g, '') ||
+    process.cwd()
+  return {
+    vbsPath: `${workDir}\\scripts\\start-router-hidden.vbs`,
+    nodePath: 'C:\\Program Files\\nodejs\\node.exe',
+    workDir,
+  }
+}
+
+/**
+ * Current launch lane of the autostart task. The legacy Hidden flag only
+ * hides the task in the Scheduler UI — the action (wscript+VBS vs bare
+ * node.exe) is what decides whether a console window appears. Falls back
+ * to the Hidden flag when the action is an unknown third-party shape.
+ */
 export async function getDaemonHidden(taskName = DAEMON_TASK_NAME): Promise<boolean | null> {
   if (!isWindows()) return null
   try {
     const xml = await readTaskXml(taskName)
+    const mode = detectLaunchMode(xml)
+    if (mode !== null) return mode
     // Absent <Hidden> = Windows default = visible console.
     if (!/<Hidden>/i.test(xml)) return false
     return parseHiddenFromXml(xml)
@@ -107,7 +178,7 @@ async function setDaemonHiddenInner(hidden: boolean, taskName: string): Promise<
   } catch (err) {
     throw new Error(`Could not read autostart task: ${err instanceof Error ? err.message : String(err)}`)
   }
-  const updated = withHiddenFlag(xml, hidden)
+  const updated = withLaunchAction(xml, { ...resolveLaunchPaths(xml), hidden })
   const tmpFile = join(tmpdir(), `zen-router-task-${Date.now()}-${Math.floor(Math.random() * 1e6)}.xml`)
   try {
     // Match what schtasks itself emits: UTF-16LE with BOM + CRLF newlines,
