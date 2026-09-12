@@ -132,7 +132,7 @@ const api = {
   setVisibleModels(payload) { return this.req('/api/visible-models', { method: 'PUT', body: payload }); },
   notifications() { return this.req('/api/notifications'); },
   testKey(id) { return this.req(`/api/keys/${id}/test`, { method: 'POST' }); },
-  recentLogs() { return this.req('/api/logs'); },
+  recentLogs(count = 500) { return this.req(`/api/logs?count=${count}`); },
 };
 
 // ---------------------------------------------------------------------------
@@ -207,9 +207,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   initLogsToolbar();
   initSearch();
   initBreakStickiness();
-  connectWebSocket();
   await refreshAll();
+  // Backfill first so charts paint from history; the WS replay that arrives
+  // on connect then merges via the ingest dedupe instead of preempting it.
   await backfillLogs();
+  connectWebSocket();
   // Re-render periodically for KPIs that come from the snapshot endpoint
   setInterval(refreshSnapshot, 5000);
   setInterval(refreshKeys, 10000);
@@ -323,19 +325,36 @@ function connectWebSocket() {
   };
 }
 
-// Backfill from /api/logs so the page is useful immediately after load
+// Backfill from /api/logs so the page is useful immediately after load.
+// WS replay and reconnects resend the same entries; the ingest dedupe
+// merges them instead of double-counting.
 async function backfillLogs() {
   try {
     const logs = await api.recentLogs();
-    // If WebSocket already populated the buffer, don't nuke it
-    if (state.recentLogs.length > 0) return;
     for (const e of logs) ingestLog(e, { initial: true });
   } catch (err) {
     console.warn('Failed to backfill logs', err);
   }
 }
 
+// Content-keyed dedupe across backfill + WS replay + reconnect replays.
+// Keyed on payload only (never __id: backfill and WS assign different ids
+// to the same entry). Capped so the set can't grow without bound.
+const seenLogKeys = new Set();
+function logContentKey(entry) {
+  let meta = '';
+  try { meta = JSON.stringify(entry.meta ?? null); } catch { meta = ''; }
+  return `${entry.timestamp}|${entry.level}|${entry.message}|${meta}`;
+}
+
 function ingestLog(entry, { initial = false } = {}) {
+  const key = logContentKey(entry);
+  if (seenLogKeys.has(key)) return;
+  seenLogKeys.add(key);
+  if (seenLogKeys.size > 15000) {
+    const oldest = seenLogKeys.values().next().value;
+    seenLogKeys.delete(oldest);
+  }
   // Idempotency: assign id based on timestamp + message hash
   if (!entry.__id) {
     entry.__id = `${entry.timestamp}-${Math.random().toString(36).slice(2, 8)}`;

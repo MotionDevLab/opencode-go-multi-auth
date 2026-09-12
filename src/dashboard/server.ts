@@ -494,8 +494,12 @@ export class DashboardServer {
       res.json({ summary, keys })
     })
 
-    this.app.get('/api/logs', (_req, res) => {
-      res.json(this.logStream.getRecentLogs())
+    this.app.get('/api/logs', (req, res) => {
+      const raw = String(req.query.count ?? '').trim()
+      let count = 500
+      const parsed = Number.parseInt(raw, 10)
+      if (raw !== '' && Number.isFinite(parsed)) count = Math.min(5000, Math.max(1, parsed))
+      res.json(this.logStream.getRecentLogs(count))
     })
 
     this.app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {

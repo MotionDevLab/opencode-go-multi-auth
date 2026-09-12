@@ -24,7 +24,8 @@ no fetch/pull/push/PRs against `samosa-ai-com`. All git I/O via remote `mine`
 | `src/dashboard/server.ts` | REST API (`/api/keys`, `/api/failover-tuning`, …) |
 | `src/dashboard/public/app.js` | Dashboard UI (cards, tuning panel, logs, Overview charts, 5m readout, hover probes, tick strip, save feedback, donut err%) |
 | `src/runtime/task-visibility.ts` | Daemon launch-lane read/write via task XML round-trip (export → modify → in-place `schtasks /create /f` overwrite; per-task write mutex; 6s settle-and-retry confirm). Hidden lane = `wscript.exe scripts/start-router-hidden.vbs` (windowless, `OPENCODE_ROUTER_PLUGIN_MODE=1`); Console lane = bare `node.exe dist\bin.js`. The legacy `<Hidden>` flag only hides the task in the Scheduler UI and is synced to match the lane |
-| `start-router.ps1` | Manual launcher: ALWAYS opens a visible titled console (`cmd /c start "Open Code Zen Router (manual)"`) — plain Start-Process inherits a hidden parent |
+| `start-router.ps1` | Manual launcher: opens a visible titled console (`cmd /c start "Open Code Zen Router (manual)"`) ONLY when the daemon is unhealthy — plain Start-Process inherits a hidden parent |
+| `scripts/start-router-gate.vbs` | Windowless `.lnk` target: probes `:18904/healthz`; healthy → opens dashboard silently (no flash), unhealthy → hands off to `start-router.ps1` visible |
 | `src/storage/*` | `ConfigStore` (tuning), `SecureStore` (keys, encrypted), runtime state |
 
 ## 3. Iron rules
@@ -92,8 +93,11 @@ Visibility work adds: `GET/PUT /api/daemon-visibility` round-trip both
 directions → live `schtasks /query … /xml` shows the `wscript.exe` +
 `start-router-hidden.vbs` action (hidden lane) or `node.exe dist\bin.js`
 (console lane), `<Hidden>` synced, triggers + principals intact →
-5-click race test (5×OK, final state == last click). Manual-lane check: shortcut opens titled
-`Open Code Zen Router (manual)` console + healthz ok.
+5-click race test (5×OK, final state == last click).
+Backfill work adds: `/api/logs?count=` capped (default 500, clamp 1..5000) →
+fresh dashboard load paints throughput from history without new traffic.
+Manual-lane check: healthy shortcut click → browser, zero console flash
+(gate VBS); stopped daemon → titled `Open Code Zen Router (manual)` console + healthz ok.
 
 ## 7. Roadmap
 
