@@ -71,6 +71,40 @@ function createProxySessionId(seed: string): string {
   return `router-${crypto.createHash('sha256').update(seed).digest('hex').slice(0, 24)}`
 }
 
+// Encrypted reasoning blobs are bound to the API key that issued them: the
+// upstream rejects them with `reasoning encrypted_content was not issued to
+// this caller` when they arrive on a different key. After a quota/cooldown
+// failover the session history still carries the old key's blobs, which
+// wedges the conversation until the user nudges it. Stripping just the
+// opaque blobs (text reasoning/summaries are kept) lets the new key continue.
+function stripEncryptedContent(body: string | undefined): { body: string | undefined; removed: number } {
+  if (!body) return { body, removed: 0 }
+  let json: unknown
+  try {
+    json = JSON.parse(body)
+  } catch {
+    return { body, removed: 0 }
+  }
+  let removed = 0
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) walk(item)
+      return
+    }
+    if (node && typeof node === 'object') {
+      const record = node as Record<string, unknown>
+      if (Object.hasOwn(record, 'encrypted_content')) {
+        delete record.encrypted_content
+        removed++
+      }
+      for (const value of Object.values(record)) walk(value)
+    }
+  }
+  walk(json)
+  if (removed === 0) return { body, removed: 0 }
+  return { body: JSON.stringify(json), removed }
+}
+
 // No request body size limit. The proxy runs on the same machine as
 // OpenCode and mirrors its behaviour: OpenCode imposes no limit on
 // the request body either. The upstream provider still applies its
@@ -100,6 +134,7 @@ export class ProxyServer {
     private getStrategy: () => RoutingStrategy,
     private getTuning: () => FailoverTuning,
     private notifier: NtfyNotifier = new NtfyNotifier(),
+    private onAffinityChange?: () => void,
   ) {
     this.config = config
     this.sessionAffinity = new SessionAffinityStore()
@@ -107,6 +142,15 @@ export class ProxyServer {
 
   clearSessionAffinity(): void {
     this.sessionAffinity.clear()
+    this.onAffinityChange?.()
+  }
+
+  loadPersistedAffinity(entries: Array<{ sessionKey: unknown; keyId: unknown; createdAt: unknown }>): void {
+    this.sessionAffinity.loadPersisted(entries)
+  }
+
+  exportAffinity(): Array<{ sessionKey: string; keyId: string; createdAt: number }> {
+    return this.sessionAffinity.exportPersisted()
   }
 
   async start(): Promise<void> {
@@ -219,6 +263,29 @@ export class ProxyServer {
 
       const { key, reason, strategy, selectedBySession } = decision
 
+      // Failover to a different key than the session's warm one: sanitize
+      // key-bound encrypted reasoning so the new key can continue the
+      // conversation instead of rejecting the whole turn.
+      const warmKeyId = sessionKey ? this.sessionAffinity.getPreferredKey(sessionKey) : undefined
+      const keySwitched = !!warmKeyId && warmKeyId !== key.id
+      if (keySwitched && prepared.body) {
+        const stripped = stripEncryptedContent(prepared.body)
+        if (stripped.removed > 0) {
+          prepared = { ...prepared, body: stripped.body }
+          this.logStream.emit(this.logger, 'warn',
+            `Key switch to "${key.alias}": stripped ${stripped.removed} encrypted_content block(s) so the new key can continue the session`, {
+              method: req.method,
+              path: targetPath,
+              keyAlias: key.alias,
+              keyId: key.id,
+              model: prepared.model,
+              strategy,
+              routeReason: reason,
+              sessionId: upstreamSessionId ?? sessionKey ?? null,
+            })
+        }
+      }
+
       if (!this.circuitBreaker.isAvailable(key.id)) {
         attemptedKeyIds.add(key.id)
         continue
@@ -252,15 +319,29 @@ export class ProxyServer {
         let duration = Date.now() - startTime
         let responseTextPromise = upstreamRes.clone().text().catch(() => '')
 
-        // A zen chat/completions request that 500s on its native endpoint may
+        // A zen chat/completions request that fails on its native endpoint may
         // belong to a model only the Responses API can serve (the free
         // contributor models). Retry ONCE in translated form on the SAME key:
         // a protocol switch is not a key failure, so it must not consume a
         // key-failover attempt. The per-model memo makes this a one-time cost
-        // per model per process. Only an exact 500 triggers this: 502/503/504
-        // are transient infra failures that fail over to the next key.
-        if (upstreamRes.status === 500 && isZenChatCompletions && !translateZenResponses && requestModel && req.url) {
-          const translatedBody = toResponsesRequestBody(body)
+        // per model per process. Two failure modes trigger this: an exact 500
+        // (native route dead), or a 400 whose body says the model does not
+        // support the protocol (upstream now rejects wrong-protocol calls
+        // with 400 instead of 500). 502/503/504 are transient infra failures
+        // that fail over to the next key; other 400s pass through verbatim.
+        // The message match keeps genuine bad-request 400s (bad params) from
+        // paying for a doomed second round trip.
+        let zenProtocolMismatch = upstreamRes.status === 500
+        if (!zenProtocolMismatch && upstreamRes.status === 400) {
+          const errorText = await responseTextPromise
+          zenProtocolMismatch = /does not support this protocol/i.test(errorText)
+        }
+        if (zenProtocolMismatch && isZenChatCompletions && !translateZenResponses && requestModel && req.url) {
+          // When this attempt already sanitized for a key switch, translate
+          // from the sanitized body so encrypted blobs cannot re-enter via
+          // the raw buffer.
+          const translationSource = keySwitched && prepared.body ? Buffer.from(prepared.body, 'utf8') : body
+          const translatedBody = toResponsesRequestBody(translationSource)
           if (translatedBody) {
             // Per-attempt snapshot: if the translated attempt also fails, the
             // next key must start native again, not inherit the /responses URL.
@@ -276,10 +357,10 @@ export class ProxyServer {
             prepared = this.prepareRequest(requestBody, targetPath)
             upstreamRes.body?.cancel().catch(() => {})
             this.logStream.emit(this.logger, 'info',
-              `Zen chat/completions 500 for "${requestModel}" - first native attempt, translating via /responses on "${key.alias}" (one-time per model per boot)`, {
+              `Zen chat/completions ${upstreamRes.status} for "${requestModel}" - wrong-protocol suspect, translating via /responses on "${key.alias}" (one-time per model per boot)`, {
                 method: req.method,
                 path: targetPath,
-                statusCode: 500,
+                statusCode: upstreamRes.status,
                 keyAlias: key.alias,
                 keyId: key.id,
                 model: requestModel,
@@ -486,6 +567,7 @@ export class ProxyServer {
 
         if (sessionKey && upstreamRes.status < 400) {
           this.sessionAffinity.setPreferredKey(sessionKey, key.id)
+          this.onAffinityChange?.()
         }
 
         const level = upstreamRes.status >= 500 ? 'error' : upstreamRes.status >= 400 ? 'warn' : 'info'

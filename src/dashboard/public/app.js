@@ -226,6 +226,13 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderOverviewChart();
     }
   }, 3000);
+  // Live cooldown countdown — fmtCooldown is wall-clock based, so re-render
+  // every second while any key is cooling even if no fetch happened.
+  setInterval(() => {
+    if (state.keys.some((k) => k.cooldownUntil && k.cooldownUntil > Date.now())) {
+      if (state.currentPage === 'accounts' || state.currentPage === 'overview') renderAccounts();
+    }
+  }, 1000);
 });
 
 // ---------------------------------------------------------------------------
@@ -497,18 +504,17 @@ function renderQuotaErrors() {
     const lastAt = last ? `at ${fmtDateTime(new Date(last.occurredAt).toISOString())}` : '';
     const resetAt = last && last.resetAt ? `retry ${fmtDateTime(new Date(last.resetAt).toISOString())}` : '';
     const msg = last && last.message ? last.message : '';
+    const details = [lastStatus, lastAt, resetAt].filter(Boolean).join(' · ');
     return `
       <div class="recon-row">
         <div class="recon-label">
           <div class="recon-key">${escapeHtml(k.alias)}</div>
           <div class="recon-key-sub">${k.enabled ? 'enabled' : 'drained'}${k.status === 'cooldown' ? ' · cooldown' : ''}</div>
         </div>
-        <div class="recon-bar router" title="Quota error count"><div style="width:0%"></div></div>
-        <div class="recon-bar opencode" title="Quota error count"><div style="width:0%"></div></div>
         <div class="recon-amount">
-          <div><strong>${fmtNumber(k.quotaErrorCount)}</strong> hit${k.quotaErrorCount === 1 ? '' : 's'}</div>
-          <div class="recon-amount-sub">${escapeHtml([lastStatus, lastAt, resetAt].filter(Boolean).join(' · '))}</div>
-          ${msg ? `<div class="recon-amount-sub" title="${escapeHtml(msg)}">${escapeHtml(msg.length > 60 ? msg.slice(0, 60) + '…' : msg)}</div>` : ''}
+          <span class="recon-dot" aria-hidden="true"></span>
+          <span class="recon-amount-main"><strong>${fmtNumber(k.quotaErrorCount)} hit${k.quotaErrorCount === 1 ? '' : 's'}</strong>${details ? ` <span class="recon-amount-sub">${escapeHtml(details)}</span>` : ''}</span>
+          ${msg ? `<span class="recon-amount-sub is-msg" title="${escapeHtml(msg)}">${escapeHtml(msg)}</span>` : ''}
         </div>
       </div>
     `;
@@ -942,12 +948,16 @@ function renderAccountCard(key) {
   const w5color = w5.err === 0 ? 'var(--green)' : (w5.err / Math.max(1, w5.req)) < 0.2 ? 'var(--yellow)' : 'var(--red)';
   const w5html = `<span class="w5" title="Requests (errors) in the last 5 minutes, from the persisted log buffer."><span class="label">5m</span><strong>${w5.req} req · <span style="color:${w5color};">${w5.err} err</span></strong></span>`;
   const lastModel = key.lastModel || '—';
-  const cooldown = key.cooldownUntil && key.cooldownUntil > Date.now()
-    ? `<span class="account-cooldown">cooldown ${fmtCooldown(key.cooldownUntil)}</span>` : '';
-  const status = key.enabled ? (key.status === 'cooldown' ? 'cooldown' : 'active') : 'drained';
-  const statusChip = key.enabled
-    ? (key.status === 'cooldown' ? '<span class="chip chip-yellow">cooldown</span>' : '<span class="chip chip-green">active</span>')
-    : '<span class="chip chip-muted">drained</span>';
+  const isCooling = key.enabled && key.status === 'cooldown' && key.cooldownUntil && key.cooldownUntil > Date.now();
+  const cooldown = isCooling
+    ? `<span class="chip chip-yellow" title="Upstream retry at ${fmtDateTime(new Date(key.cooldownUntil).toISOString())}">cooldown ${fmtCooldown(key.cooldownUntil)}</span>` : '';
+  const statusChip = !key.enabled
+    ? '<span class="chip chip-muted">drained</span>'
+    : isCooling
+      ? '' // timer chip above already conveys cooldown + time; avoid duplicate pill
+      : key.status === 'cooldown'
+        ? '<span class="chip chip-yellow">cooldown</span>'
+        : '<span class="chip chip-green">active</span>';
 
   const quotaErrorCount = key.quotaErrorCount || 0;
   const lastQuotaError = key.lastQuotaError;

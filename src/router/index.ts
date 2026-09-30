@@ -85,6 +85,7 @@ export async function createRouter(
   let keyManager!: KeyManager
   let quotaTracker!: QuotaTracker
   let logStream!: LogStream
+  let proxyServer!: ProxyServer
   let persistTimer: NodeJS.Timeout | undefined
   let persistReady = false
 
@@ -96,6 +97,7 @@ export async function createRouter(
         keys: keyManager.exportRuntimeState(),
         quota: quotaTracker.exportState(),
         logs: logStream.export(),
+        affinity: proxyServer.exportAffinity(),
       })
     }, 100)
   }
@@ -135,7 +137,7 @@ export async function createRouter(
     logToFile('info', `NTFY notifications enabled → ${mergedConfig.ntfyUrl}`)
   }
 
-  const proxyServer = new ProxyServer(
+  proxyServer = new ProxyServer(
     {
       port: mergedConfig.proxyPort,
       upstreamUrl: mergedConfig.upstreamUrl,
@@ -154,7 +156,9 @@ export async function createRouter(
     () => normalizeRoutingStrategy(configStore.get('strategy')),
     () => tuningFromConfig(configStore.getAll()),
     notifier,
+    persistRuntimeState,
   )
+  proxyServer.loadPersistedAffinity(runtimeState.affinity)
 
   const dashboardServer = new DashboardServer(
     mergedConfig.dashboardPort,
@@ -199,6 +203,7 @@ export async function createRouter(
         keys: keyManager.exportRuntimeState(),
         quota: quotaTracker.exportState(),
         logs: logStream.export(),
+        affinity: proxyServer.exportAffinity(),
       })
       await proxyServer.stop()
       await dashboardServer.stop()

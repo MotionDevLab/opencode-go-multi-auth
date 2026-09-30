@@ -16,7 +16,8 @@ const HOP_BY_HOP = new Set([
 const FORWARDED_HEADERS = new Set([
   'accept', 'accept-encoding', 'accept-language', 'content-type',
   'anthropic-version', 'anthropic-beta',
-  'x-opencode-session',
+  'user-agent',
+  'x-opencode-session', 'x-opencode-client', 'x-opencode-version',
 ])
 
 export function isCacheHeader(name: string): boolean {
@@ -55,6 +56,15 @@ export function buildUpstreamHeaders(
     if (CACHE_HEADERS.has(lower) || FORWARDED_HEADERS.has(lower)) {
       headers[key] = Array.isArray(value) ? value.join(', ') : String(value ?? '')
     }
+  }
+
+  // Upstream gates `-free` models on `User-Agent: opencode/...` (free-tier
+  // capacity is reserved for the official client). This request originates
+  // from opencode, so when opencode did not send one, identify honestly as
+  // the proxy rather than leaking a `node`/`undici` default that upstream
+  // rejects with "free tier can only be used from within OpenCode".
+  if (!headers['user-agent']) {
+    headers['user-agent'] = 'opencode/router'
   }
 
   return headers

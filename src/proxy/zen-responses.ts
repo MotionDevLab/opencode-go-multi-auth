@@ -1,8 +1,9 @@
 /**
  * OpenCode Zen serves the Responses API. Its `/v1/chat/completions` route
- * still exists, but returns 500 for the free contributor models, so a
- * config-declared provider (which always speaks chat/completions) cannot
- * reach Zen at all.
+ * still exists, but rejects the free contributor models there (an exact 500
+ * historically, now a 400 "Model does not support this protocol"), so a
+ * config-declared provider that always speaks chat/completions cannot reach
+ * those models natively.
  *
  * This module translates chat/completions <-> responses for the Zen
  * upstream only, so those models stay reachable through the pool.

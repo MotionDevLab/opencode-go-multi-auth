@@ -6,3 +6,4 @@ dist/
 .DS_Store
 repos/
 .playwright-mcp/*.yml
+.opencode/

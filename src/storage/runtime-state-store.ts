@@ -51,6 +51,12 @@ export interface StoredKeyRuntimeState {
   lastSessionId: string | null
 }
 
+export interface StoredSessionAffinity {
+  sessionKey: string
+  keyId: string
+  createdAt: number
+}
+
 export interface StoredLogEntry {
   timestamp: string
   level: string
@@ -63,9 +69,10 @@ export interface RouterRuntimeState {
   keys: StoredKeyRuntimeState[]
   quota: StoredQuotaEntry[]
   logs: StoredLogEntry[]
+  affinity: StoredSessionAffinity[]
 }
 
-const CURRENT_VERSION = 1
+const CURRENT_VERSION = 2
 
 export class RuntimeStateStore {
   private readonly filePath: string
@@ -91,6 +98,7 @@ export class RuntimeStateStore {
         keys: Array.isArray(parsed.keys) ? parsed.keys : [],
         quota: Array.isArray(parsed.quota) ? parsed.quota : [],
         logs: Array.isArray(parsed.logs) ? parsed.logs : [],
+        affinity: Array.isArray(parsed.affinity) ? parsed.affinity : [],
       }
     } catch {
       return this.emptyState()
@@ -103,6 +111,7 @@ export class RuntimeStateStore {
       keys: state.keys,
       quota: state.quota,
       logs: state.logs,
+      affinity: state.affinity,
     }
     fs.writeFileSync(this.filePath, JSON.stringify(payload, null, 2), 'utf8')
   }
@@ -113,6 +122,7 @@ export class RuntimeStateStore {
       keys: [],
       quota: [],
       logs: [],
+      affinity: [],
     }
   }
 }

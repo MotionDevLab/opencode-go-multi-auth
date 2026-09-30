@@ -16,15 +16,16 @@ agents editing the code.
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm run build       # tsc AND cp -r src/dashboard/public/. dist/dashboard/public/
+npm run build       # tsc AND node scripts/copy-dashboard-public.js (src/dashboard/public/ -> dist/dashboard/public/)
 npm run dev         # tsx watch src/bin.ts (standalone mode, no plugin)
 npm run start       # node dist/bin.js (standalone mode)
-npm run clean       # rm -rf dist
+npm run clean       # node scripts/clean-dist.js (rm -rf dist)
 ```
 
 **Critical:** `src/dashboard/public/` is a static asset directory that is
 **not compiled by `tsc`**. `npm run build` is a two-step pipeline: it
-runs `tsc` first, then `cp -r` the dashboard public/ into `dist/`. If you
+runs `tsc` first, then copies the dashboard public/ into `dist/`
+via `scripts/copy-dashboard-public.js`. If you
 edit a `.html`, `.css`, or `.js` file under `src/dashboard/public/`, the
 copy step is what makes the change visible. Running `tsc` alone, or
 running `tsx` directly, will not pick up dashboard UI changes. The `.ts`
@@ -119,10 +120,21 @@ Key invariants to preserve:
 
 - **The proxy is a byte-for-byte pass-through on the request and
   response body.** Do not parse `tool_use`, `tools`, or `messages` to
-  make routing decisions. The only body modification is
-  `stream_options.include_usage = true` injection, which is gated to
+  make routing decisions. The only body modifications are
+  `stream_options.include_usage = true` injection (gated to
   `targetPath ∈ {/chat/completions, /v1/chat/completions}` and
-  `stream === true` (see `prepareRequest` in `src/proxy/server.ts`).
+  `stream === true`, see `prepareRequest`) and `encrypted_content`
+  stripping, which runs ONLY when a session fails over to a different
+  key than its warm one (see `stripEncryptedContent` in
+  `src/proxy/server.ts` — encrypted blobs are key-bound and the new
+  key would otherwise reject the turn).
+- **Upstream headers:** `buildUpstreamHeaders` forwards `user-agent`
+  (defaulting to `opencode/router` when opencode sent none — upstream
+  gates `-free` models on an `opencode/...` UA) and `x-opencode-*`
+  client hints. Session affinity keys on `x-session-id` first, then
+  `x-opencode-session`, then cache keys — do not remove
+  `x-opencode-session` or stickiness silently stops for paths that
+  send no `x-session-id`.
 - **Path routing:** opencode-go serves Anthropic models
   (minimax-m*, Qwen3.7, etc.) on `/messages` and OpenAI-compat models
   (DeepSeek V4, GLM, Kimi) on `/chat/completions`. The proxy

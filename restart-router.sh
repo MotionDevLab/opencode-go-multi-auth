@@ -23,6 +23,7 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-18904}"
 PROXY_PORT="${PROXY_PORT:-18905}"
 HEALTH_URL="http://127.0.0.1:${DASHBOARD_PORT}/healthz"
 PID_FILE="${HOME}/.opencode/router.pid"
+SCRIPT_START_MS=$(date +%s%3N 2>/dev/null || echo $(( $(date +%s) * 1000 )))
 
 cd "${REPO_DIR}"
 
@@ -156,14 +157,30 @@ for _ in $(seq 1 50); do
         healthy=1
         break
     fi
-    # If the child died, stop polling.
-    if ! kill -0 "${NEW_PID}" 2>/dev/null; then
-        break
-    fi
+    # NOTE: no `kill -0 $NEW_PID` early-exit here on purpose. Under Git Bash
+    # on Windows, $! is an MSYS pid that does not map to the native Windows
+    # PID, so kill -0 reports a live daemon as dead and would abort the wait
+    # early. The 10s poll timeout below is the only stop condition.
     sleep 0.2
 done
 
 if [ "${healthy}" -eq 1 ]; then
+    # Guard against a false healthy: an OLD daemon may still hold the ports
+    # (Git Bash `kill` cannot signal native Windows PIDs, so step 2 can miss
+    # it) while the new child died on EADDRINUSE — /healthz then answers from
+    # the old process. Require a freshly written router.pid as proof the new
+    # daemon actually booted.
+    PID_STARTED_AT=""
+    if [ -f "${PID_FILE}" ]; then
+        PID_STARTED_AT=$(sed -n 's/.*"startedAt"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "${PID_FILE}" | head -n1)
+    fi
+    if [ -z "${PID_STARTED_AT}" ] || [ "${PID_STARTED_AT}" -lt "${SCRIPT_START_MS}" ]; then
+        echo "ERROR: ${HEALTH_URL} answers, but router.pid was not freshly written (startedAt=${PID_STARTED_AT:-missing}, script started at ${SCRIPT_START_MS})." >&2
+        echo "A stale daemon is likely still holding ports ${DASHBOARD_PORT}/${PROXY_PORT} and the new daemon died on EADDRINUSE." >&2
+        echo "Find the holder with: Get-NetTCPConnection -LocalPort ${DASHBOARD_PORT},${PROXY_PORT} -State Listen" >&2
+        echo "Stop it with: Stop-Process -Id <pid> -Force, then re-run this script." >&2
+        exit 1
+    fi
     echo "${HEALTH_URL} — daemon is healthy (pid ${NEW_PID})"
     exit 0
 fi
