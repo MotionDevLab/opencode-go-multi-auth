@@ -480,7 +480,12 @@ export class SseTranslator {
       return `data: ${JSON.stringify({ error: (parsed.error ?? parsed) as unknown })}\n\ndata: [DONE]\n\n`
     }
 
-    if (eventName === 'response.function_call_arguments.done') {
+    if (
+      eventName === 'response.function_call_arguments.done' ||
+      eventName === 'response.content_part.added' ||
+      eventName === 'response.content_part.done' ||
+      eventName === 'response.output_text.done'
+    ) {
       return ''
     }
 
