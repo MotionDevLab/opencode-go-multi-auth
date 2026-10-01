@@ -1,0 +1,11 @@
+# Normalize line endings (checkout native, commit LF) so Windows checkouts
+# stop showing phantom modifications on every file.
+* text=auto
+
+# Never touch key material or images.
+*.enc binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
