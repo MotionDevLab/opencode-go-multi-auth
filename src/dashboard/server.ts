@@ -270,6 +270,7 @@ export class DashboardServer {
       this.configStore.set('retryAfterCapMs', tuning.retryAfterCapMs)
       this.configStore.set('windowFailures', tuning.windowFailures)
       this.configStore.set('windowSeconds', tuning.windowSeconds)
+      this.configStore.set('sseIdleTimeoutMs', tuning.sseIdleTimeoutMs)
       this.circuitBreaker.setThreshold(tuning.circuitBreakerThreshold)
       this.circuitBreaker.setRecoveryMs(tuning.circuitBreakerRecoveryMs)
       this.circuitBreaker.setSelfCancelMs(tuning.breakerSelfCancelMs)

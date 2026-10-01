@@ -28,6 +28,7 @@ export interface ProxyServerConfig {
   upstreamUrlZen: string
   requestTimeoutMs: number
   upstreamHungTimeoutMs: number
+  sseIdleTimeoutMs: number
   fallbackCooldownMs: number
   keepAliveTimeoutMs: number
   headersTimeoutMs: number
@@ -45,6 +46,18 @@ interface RoutingDecision {
   strategy: RoutingStrategy
   selectedBySession: boolean
 }
+
+interface StreamPipeStats {
+  ttfbMs: number | null
+  maxIdleGapMs: number
+  chunks: number
+  bytes: number
+  idleAborted: boolean
+}
+
+// Node setTimeout delays overflow past 2^31-1ms to ~1ms. The dashboard caps
+// this value, but the env fallback is unbounded, so clamp before arming.
+const MAX_TIMEOUT_DELAY_MS = 2_147_483_647
 
 function buildUpstreamUrl(upstreamUrl: string, requestUrl?: string): string {
   const upstream = new URL(upstreamUrl)
@@ -523,10 +536,18 @@ export class ProxyServer {
         // neither feed nor reset the breaker.
 
         const responseHeaders = this.buildResponseHeaders(upstreamRes)
+        let streamStats: StreamPipeStats | null = null
+        const tuning = this.getTuning()
+        const idleTimeoutMs = tuning.sseIdleTimeoutMs > 0
+          ? tuning.sseIdleTimeoutMs
+          : this.config.sseIdleTimeoutMs
+        const abortStream = (reason: Error) => {
+          if (!upstreamAbortController.signal.aborted) upstreamAbortController.abort(reason)
+        }
         if (translateZenResponses && upstreamRes.status < 400 && upstreamRes.body) {
           res.writeHead(upstreamRes.status, responseHeaders)
           if (prepared.stream) {
-            await this.pipeTranslatedZenStream(upstreamRes.body, res, includeUsage)
+            streamStats = await this.pipeTranslatedZenStream(upstreamRes.body, res, includeUsage, idleTimeoutMs, abortStream)
           } else {
             const translatedBody = await responseTextPromise
             res.end(toChatCompletion(translatedBody))
@@ -535,10 +556,50 @@ export class ProxyServer {
         } else {
           res.writeHead(upstreamRes.status, responseHeaders)
           if (upstreamRes.body) {
-            await this.pipeResponseBody(upstreamRes.body, res)
+            streamStats = await this.pipeResponseBody(
+              upstreamRes.body,
+              res,
+              idleTimeoutMs,
+              abortStream,
+            )
           } else {
             res.end()
           }
+        }
+
+        if (streamStats?.idleAborted) {
+          // The 200 headers and partial body are already committed to the
+          // client, so unlike a pre-response 5xx this must not fail over to
+          // the next key — a second response cannot follow the first on the
+          // same stream. Fail this turn loudly instead.
+          this.circuitBreaker.recordFailure(key.id)
+          this.keyManager.markError(key.id)
+          this.keyManager.recordRequest(key.id, {
+            statusCode: upstreamRes.status,
+            durationMs: Date.now() - startTime,
+            model: prepared.model,
+            sessionId: upstreamSessionId ?? sessionKey ?? null,
+            successful: false,
+          })
+          attemptedKeyIds.add(key.id)
+          this.logStream.emit(this.logger, 'warn', `${req.method} ${targetPath} -> stream stalled (${streamStats.maxIdleGapMs}ms silence), aborted`, {
+            method: req.method,
+            path: targetPath,
+            statusCode: upstreamRes.status,
+            keyAlias: key.alias,
+            keyId: key.id,
+            duration: Date.now() - startTime,
+            ttfbMs: streamStats.ttfbMs,
+            maxIdleGapMs: streamStats.maxIdleGapMs,
+            streamChunks: streamStats.chunks,
+            model: prepared.model,
+            strategy,
+            routeReason: reason,
+            selectedBySession,
+            sessionId: upstreamSessionId ?? sessionKey ?? null,
+            upstream: isZenRequest ? 'zen' : 'go',
+          })
+          return
         }
 
         const responseBody = await responseTextPromise
@@ -586,6 +647,9 @@ export class ProxyServer {
           tokens: tokens || null,
           cost,
           costEstimated,
+          ttfbMs: streamStats?.ttfbMs ?? null,
+          maxIdleGapMs: streamStats?.maxIdleGapMs ?? null,
+          streamChunks: streamStats?.chunks ?? null,
           upstream: isZenRequest ? 'zen' : 'go',
         })
         return
@@ -810,10 +874,19 @@ export class ProxyServer {
   }
 
   /** Pipe a Zen Responses SSE stream to the client as chat.completion.chunk frames. */
-  private async pipeTranslatedZenStream(body: ReadableStream<Uint8Array>, res: http.ServerResponse, includeUsage = false): Promise<void> {
+  private async pipeTranslatedZenStream(
+    body: ReadableStream<Uint8Array>,
+    res: http.ServerResponse,
+    includeUsage = false,
+    idleTimeoutMs = 0,
+    abortUpstream?: (reason: Error) => void,
+  ): Promise<StreamPipeStats> {
+    const stats: StreamPipeStats = { ttfbMs: null, maxIdleGapMs: 0, chunks: 0, bytes: 0, idleAborted: false }
     const reader = body.getReader()
     const translator = new SseTranslator(includeUsage)
     const decoder = new TextDecoder()
+    const startedAt = Date.now()
+    let lastChunkAt = startedAt
     let buffered = ''
 
     const processEvent = (rawEvent: string) => {
@@ -844,11 +917,25 @@ export class ProxyServer {
 
     try {
       while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
+        const chunk = await this.readStreamChunk(reader, idleTimeoutMs)
+        if (chunk.timedOut) {
+          stats.idleAborted = true
+          stats.maxIdleGapMs = Date.now() - lastChunkAt
+          await reader.cancel().catch(() => {})
+          abortUpstream?.(new Error(`SSE stream idle for ${idleTimeoutMs}ms`))
+          res.destroy()
+          return stats
+        }
+        if (chunk.done) break
+        const now = Date.now()
+        if (stats.chunks === 0) stats.ttfbMs = now - startedAt
+        stats.maxIdleGapMs = Math.max(stats.maxIdleGapMs, now - lastChunkAt)
+        lastChunkAt = now
+        stats.chunks += 1
+        stats.bytes += chunk.value?.byteLength ?? 0
         // Normalise CRLF before splitting on \n\n so a \r\n-stream frames the
         // same way as an \n-stream.
-        buffered += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n')
+        buffered += decoder.decode(chunk.value ?? new Uint8Array(), { stream: true }).replace(/\r\n/g, '\n')
         processBuffer()
       }
       // Flush any remaining multi-byte sequence from the decoder, then treat
@@ -860,25 +947,82 @@ export class ProxyServer {
       processBuffer()
       if (buffered.trim()) processEvent(buffered)
       res.end()
+      return stats
     } catch {
       res.end()
+      return stats
     }
   }
 
-  private async pipeResponseBody(body: ReadableStream<Uint8Array>, res: http.ServerResponse): Promise<void> {
+  // A locked reader allows only one pending read, so an idle timeout must
+  // cancel the in-flight read before returning rather than racing past it.
+  private async readStreamChunk(
+    reader: ReadableStreamDefaultReader<Uint8Array>,
+    idleTimeoutMs: number,
+  ): Promise<{ timedOut: true } | { timedOut: false; done: boolean; value?: Uint8Array }> {
+    if (idleTimeoutMs <= 0) {
+      const result = await reader.read()
+      return result.done
+        ? { timedOut: false, done: true }
+        : { timedOut: false, done: false, value: result.value }
+    }
+    let timer: NodeJS.Timeout | undefined
+    try {
+      return await Promise.race([
+        reader.read().then((result): { timedOut: false; done: boolean; value?: Uint8Array } => result.done
+          ? { timedOut: false, done: true }
+          : { timedOut: false, done: false, value: result.value }),
+        new Promise<{ timedOut: true }>((resolve) => {
+          timer = setTimeout(() => resolve({ timedOut: true }), Math.min(idleTimeoutMs, MAX_TIMEOUT_DELAY_MS))
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  private async pipeResponseBody(
+    body: ReadableStream<Uint8Array>,
+    res: http.ServerResponse,
+    idleTimeoutMs = 0,
+    abortUpstream?: (reason: Error) => void,
+  ): Promise<StreamPipeStats> {
+    const stats: StreamPipeStats = { ttfbMs: null, maxIdleGapMs: 0, chunks: 0, bytes: 0, idleAborted: false }
     const reader = body.getReader()
+    const startedAt = Date.now()
+    let lastChunkAt = startedAt
 
     try {
       while (true) {
-        const { done, value } = await reader.read()
-        if (done) {
-          res.end()
-          return
+        const chunk = await this.readStreamChunk(reader, idleTimeoutMs)
+        if (chunk.timedOut) {
+          stats.idleAborted = true
+          stats.maxIdleGapMs = Date.now() - lastChunkAt
+          await reader.cancel().catch(() => {})
+          abortUpstream?.(new Error(`SSE stream idle for ${idleTimeoutMs}ms`))
+          res.destroy()
+          return stats
         }
-        res.write(value)
+        if (chunk.done) {
+          res.end()
+          return stats
+        }
+        const now = Date.now()
+        if (stats.chunks === 0) stats.ttfbMs = now - startedAt
+        stats.maxIdleGapMs = Math.max(stats.maxIdleGapMs, now - lastChunkAt)
+        lastChunkAt = now
+        stats.chunks += 1
+        stats.bytes += chunk.value?.byteLength ?? 0
+        try {
+          res.write(chunk.value)
+        } catch {
+          await reader.cancel().catch(() => {})
+          return stats
+        }
       }
     } catch {
       res.end()
+      return stats
     }
   }
 

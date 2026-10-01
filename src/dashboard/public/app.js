@@ -1346,6 +1346,29 @@ async function renderFailoverTuning() {
     host.innerHTML = '<div class="empty-state">Failover tuning unavailable.</div>';
     return;
   }
+  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-sse-enabled', '#ft-sse-idle', '#ft-burst', '#ft-retry-after'];
+  const ftDomSnapshot = () => {
+    if (!$('#ft-threshold')) return null;
+    return ftFields.map((id) => {
+      const el = $(id);
+      return el && 'checked' in el && el.type === 'checkbox' ? String(el.checked) : String(el ? el.value : '');
+    }).join('|');
+  };
+  const ftStateBaseline = () => [
+    t.circuitBreakerThreshold,
+    Math.round(t.circuitBreakerRecoveryMs / 1000),
+    Math.round((t.breakerSelfCancelMs || 0) / 1000),
+    t.windowFailures,
+    t.windowSeconds,
+    Math.round(t.retryAfterCapMs / 1000),
+    (t.sseIdleTimeoutMs || 0) > 0,
+    Math.round((t.sseIdleTimeoutMs || 0) / 1000),
+    !!t.burstFailoverEnabled,
+    !!t.honorRetryAfter,
+  ].join('|');
+  // The snapshot poller re-renders this page every 5s. Never rebuild the form
+  // while the user has unsaved edits — that is what was wiping typed values.
+  if (ftDomSnapshot() !== null && ftDomSnapshot() !== ftStateBaseline()) return;
   host.innerHTML = `
     <div class="card">
       <div class="card-head">
@@ -1380,6 +1403,15 @@ async function renderFailoverTuning() {
             <label>Retry-After cap (60–3600s)<input class="input" type="number" min="60" max="3600" id="ft-cap" value="${Math.round(t.retryAfterCapMs / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Upper bound for upstream-supplied waits. Caps one Retry-After header from exiling a key for hours.</small></label>
           </div>
         </div>
+        <div class="ft-group ft-group-trip">
+          <div class="ft-group-label">Stream watchdog — hung mid-stream turns fail loudly instead of hanging</div>
+          <div style="display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap;">
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px; padding-top: 24px;" title="When on, a stream with no chunks for longer than the idle timeout is aborted and logged. When off, silent streams hang until stopped manually (env SSE_IDLE_TIMEOUT_MS still applies as a fallback when set).">
+              <input type="checkbox" class="ft-input" id="ft-sse-enabled" ${((t.sseIdleTimeoutMs || 0) > 0) ? 'checked' : ''}> Watchdog on
+            </label>
+            <label style="flex: 1; min-width: 200px;">Idle abort (30–900s)<input class="input" type="number" min="30" max="900" id="ft-sse-idle" value="${Math.round((t.sseIdleTimeoutMs || 0) / 1000)}" ${((t.sseIdleTimeoutMs || 0) > 0) ? '' : 'disabled'}><small style="color: var(--text-faint); font-size: 11px;">Max silence between streamed chunks before the turn is aborted with a log line. Keep generous: long reasoning gaps stream zero chunks and look identical to a hang.</small></label>
+          </div>
+        </div>
         <div class="ft-group ft-group-counts">
           <div class="ft-group-label">Failure modes — what each response does to a key</div>
           <div class="ft-legend">
@@ -1405,22 +1437,29 @@ async function renderFailoverTuning() {
       </div>
     </div>
   `;
-  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-burst', '#ft-retry-after'];
-  const ftSnapshot = () => ftFields.map((id) => {
-    const el = $(id);
-    return el && 'checked' in el && el.type === 'checkbox' ? String(el.checked) : String(el ? el.value : '');
-  }).join('|');
-  const ftBaseline = ftSnapshot();
   const ftMarkDirty = () => {
     const dirty = $('#ft-dirty');
-    if (dirty) dirty.hidden = ftSnapshot() === ftBaseline;
+    if (dirty) dirty.hidden = ftDomSnapshot() === ftStateBaseline();
   };
   ftFields.forEach((id) => {
     const el = $(id);
     if (el) el.addEventListener(el.type === 'checkbox' ? 'change' : 'input', ftMarkDirty);
   });
+  const sseEnabledEl = $('#ft-sse-enabled');
+  const sseIdleEl = $('#ft-sse-idle');
+  sseEnabledEl.addEventListener('change', () => {
+    sseIdleEl.disabled = !sseEnabledEl.checked;
+    if (sseEnabledEl.checked && !(Number(sseIdleEl.value) >= 30)) sseIdleEl.value = '180';
+    ftMarkDirty();
+  });
   $('#ft-save').addEventListener('click', async () => {
     const num = (id) => Number($(id).value);
+    const sseOn = $('#ft-sse-enabled').checked;
+    const sseSecs = num('#ft-sse-idle');
+    if (sseOn && (!Number.isFinite(sseSecs) || sseSecs < 30 || sseSecs > 900)) {
+      toast('Stream idle abort must be 30–900s, or switch the watchdog off', 'error');
+      return;
+    }
     const payload = {
       circuitBreakerThreshold: num('#ft-threshold'),
       circuitBreakerRecoveryMs: num('#ft-recovery') * 1000,
@@ -1428,6 +1467,7 @@ async function renderFailoverTuning() {
       windowFailures: num('#ft-window-fails'),
       windowSeconds: num('#ft-window-secs'),
       retryAfterCapMs: num('#ft-cap') * 1000,
+      sseIdleTimeoutMs: sseOn ? sseSecs * 1000 : 0,
       burstFailoverEnabled: $('#ft-burst').checked,
       honorRetryAfter: $('#ft-retry-after').checked,
     };
@@ -1439,10 +1479,12 @@ async function renderFailoverTuning() {
     if (payload.circuitBreakerRecoveryMs !== prev.circuitBreakerRecoveryMs) diffBits.push(`Recovery ${fmtS(prev.circuitBreakerRecoveryMs)}→${fmtS(payload.circuitBreakerRecoveryMs)}`);
     if (payload.breakerSelfCancelMs !== prev.breakerSelfCancelMs) diffBits.push(`Self-cancel ${fmtS(prev.breakerSelfCancelMs)}→${fmtS(payload.breakerSelfCancelMs)}`);
     if (payload.retryAfterCapMs !== prev.retryAfterCapMs) diffBits.push(`Cap ${fmtS(prev.retryAfterCapMs)}→${fmtS(payload.retryAfterCapMs)}`);
+    if ((payload.sseIdleTimeoutMs || 0) !== (prev.sseIdleTimeoutMs || 0)) diffBits.push(`Stream watchdog ${payload.sseIdleTimeoutMs ? fmtS(payload.sseIdleTimeoutMs) : 'off'}`);
     if (payload.burstFailoverEnabled !== prev.burstFailoverEnabled) diffBits.push(`Burst-failover ${payload.burstFailoverEnabled ? 'on' : 'off'}`);
     if (payload.honorRetryAfter !== prev.honorRetryAfter) diffBits.push(`Honor Retry-After ${payload.honorRetryAfter ? 'on' : 'off'}`);
     if (diffBits.length === 0) {
       toast('Already at these values — nothing saved', 'info');
+      renderFailoverTuning();
       return;
     }
     try {

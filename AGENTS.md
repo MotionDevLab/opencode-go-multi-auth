@@ -210,11 +210,25 @@ Key invariants to preserve:
   on the upstream fetch. This mirrors opencode's `provider.ts:1703`,
   which only adds a signal when `options['timeout']` is set, and the
   anthropic/opencode provider definitions set neither `timeout`,
-  `headerTimeout`, nor `chunkTimeout`. If you need a guard, use the
+  `headerTimeout`, nor `  chunkTimeout`. If you need a guard, use the
   env-gated `REQUEST_TIMEOUT_MS` or `UPSTREAM_HUNG_TIMEOUT_MS` (both
   default `0` = off) — **do not reintroduce a hard-coded timeout**. The
   client-cancel signal is forwarded via `res.once('close')` →
   `upstreamAbortController.abort()` and must keep working.
+- **Mid-stream stalls:** `UPSTREAM_HUNG_TIMEOUT_MS` only guards
+  time-to-first-response-headers. The separate env-gated
+  `SSE_IDLE_TIMEOUT_MS` (default `0` = off) guards silence *between*
+  streamed chunks: when set, `pipeResponseBody` aborts the upstream
+  fetch and destroys the client connection after that long without a
+  chunk, logging `stream stalled (Nms silence), aborted`. The live value
+  comes from the dashboard's Failover tuning (Stream idle abort,
+  validated 0 or 30–900s, applies immediately with no restart); the
+  env var is only the fallback when tuning is 0, and 0/0 means off. A stalled
+  turn fails loudly instead of hanging, but it cannot fail over to
+  the next key — the 200 headers and partial body are already
+  committed to the client. Keep the threshold generous (minutes, not
+  seconds): long model reasoning gaps with zero chunks are
+  indistinguishable from a hung stream.
 
 ## Quota handling — react, do not predict
 

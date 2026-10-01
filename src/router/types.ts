@@ -91,6 +91,7 @@ export interface RouterConfig {
   visibleModels: string
   requestTimeoutMs: number
   upstreamHungTimeoutMs: number
+  sseIdleTimeoutMs: number
   keepAliveTimeoutMs: number
   headersTimeoutMs: number
 }
@@ -168,6 +169,7 @@ export const DEFAULT_CONFIG: RouterConfig = {
   visibleModels: '',
   requestTimeoutMs: 0,
   upstreamHungTimeoutMs: 0,
+  sseIdleTimeoutMs: 0,
   keepAliveTimeoutMs: 5 * 60 * 1000,
   headersTimeoutMs: 60 * 1000,
 }
@@ -187,6 +189,7 @@ export interface FailoverTuning {
   retryAfterCapMs: number
   windowFailures: number
   windowSeconds: number
+  sseIdleTimeoutMs: number
 }
 
 export const FAILOVER_TUNING_RANGES = {
@@ -219,6 +222,15 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
   if (selfCancel !== 0 && (selfCancel < 30_000 || selfCancel > 900_000)) {
     return { ok: false, error: 'breakerSelfCancelMs must be 0 or between 30000 and 900000' }
   }
+  // sseIdleTimeoutMs: 0 = watchdog off; otherwise 30s–15min. Shorter would
+  // murder legitimate long reasoning gaps that stream zero chunks.
+  const sseIdle = v.sseIdleTimeoutMs
+  if (typeof sseIdle !== 'number' || !Number.isInteger(sseIdle)) {
+    return { ok: false, error: 'sseIdleTimeoutMs must be an integer' }
+  }
+  if (sseIdle !== 0 && (sseIdle < 30_000 || sseIdle > 900_000)) {
+    return { ok: false, error: 'sseIdleTimeoutMs must be 0 or between 30000 and 900000' }
+  }
   for (const name of ['burstFailoverEnabled', 'honorRetryAfter']) {
     if (typeof v[name] !== 'boolean') return { ok: false, error: `${name} must be a boolean` }
   }
@@ -233,6 +245,7 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
       retryAfterCapMs: v.retryAfterCapMs as number,
       windowFailures: v.windowFailures as number,
       windowSeconds: v.windowSeconds as number,
+      sseIdleTimeoutMs: sseIdle,
     },
   }
 }
@@ -247,5 +260,6 @@ export function tuningFromConfig(config: RouterConfig): FailoverTuning {
     retryAfterCapMs: config.retryAfterCapMs,
     windowFailures: config.windowFailures,
     windowSeconds: config.windowSeconds,
+    sseIdleTimeoutMs: config.sseIdleTimeoutMs,
   }
 }

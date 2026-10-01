@@ -65,6 +65,7 @@ function loadEnvConfig(): Partial<RouterConfig> {
     ntfyUrl: process.env.NTFY_URL || DEFAULT_CONFIG.ntfyUrl,
     requestTimeoutMs: readPositiveInt(process.env.REQUEST_TIMEOUT_MS, DEFAULT_CONFIG.requestTimeoutMs),
     upstreamHungTimeoutMs: readPositiveInt(process.env.UPSTREAM_HUNG_TIMEOUT_MS, DEFAULT_CONFIG.upstreamHungTimeoutMs),
+    sseIdleTimeoutMs: readPositiveInt(process.env.SSE_IDLE_TIMEOUT_MS, DEFAULT_CONFIG.sseIdleTimeoutMs),
     keepAliveTimeoutMs: readPositiveInt(process.env.KEEP_ALIVE_TIMEOUT_MS, DEFAULT_CONFIG.keepAliveTimeoutMs),
     headersTimeoutMs: readPositiveInt(process.env.HEADERS_TIMEOUT_MS, DEFAULT_CONFIG.headersTimeoutMs),
   }
@@ -144,6 +145,7 @@ export async function createRouter(
       upstreamUrlZen: mergedConfig.upstreamUrlZen,
       requestTimeoutMs: mergedConfig.requestTimeoutMs,
       upstreamHungTimeoutMs: mergedConfig.upstreamHungTimeoutMs,
+      sseIdleTimeoutMs: mergedConfig.sseIdleTimeoutMs,
       fallbackCooldownMs: mergedConfig.cooldownMs,
       keepAliveTimeoutMs: mergedConfig.keepAliveTimeoutMs,
       headersTimeoutMs: mergedConfig.headersTimeoutMs,
