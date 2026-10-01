@@ -609,7 +609,7 @@ export class ProxyServer {
             ? `no terminal event (${tr.eventsIn} in, ${tr.framesOut} out)`
             : tr.terminalKind === 'response.incomplete'
               ? `truncated turn (${tr.toolFramesOut} tool frames in flight)`
-              : `unknown=${tr.unknownEvents} parseErrors=${tr.parseErrors}`
+              : `unknown=${tr.unknownEvents}${tr.unknownKinds.length ? ` (${tr.unknownKinds.join(',')})` : ''} parseErrors=${tr.parseErrors}`
           this.logStream.emit(this.logger, 'warn', `${req.method} ${targetPath} -> translation anomaly (${anomalyReason})`, {
             method: req.method,
             path: targetPath,
@@ -623,6 +623,7 @@ export class ProxyServer {
             translatedIn: tr.eventsIn,
             translatedOut: tr.framesOut,
             translatedTools: tr.toolFramesOut,
+            unknownKinds: tr.unknownKinds,
           })
         }
 

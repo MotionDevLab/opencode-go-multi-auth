@@ -328,6 +328,7 @@ export interface TranslatorStats {
   parseErrors: number
   sawTerminal: boolean
   terminalKind: string | null
+  unknownKinds: string[]
 }
 
 /**
@@ -359,10 +360,12 @@ export class SseTranslator {
     eventsIn: 0, framesOut: 0, toolFramesOut: 0,
     unknownEvents: 0, parseErrors: 0,
     sawTerminal: false, terminalKind: null,
+    unknownKinds: [],
   }
+  private readonly unknownKindSeen = new Set<string>()
 
   stats(): TranslatorStats {
-    return { ...this.stat }
+    return { ...this.stat, unknownKinds: [...this.stat.unknownKinds] }
   }
 
   translate(eventName: string, data: string): string {
@@ -477,7 +480,15 @@ export class SseTranslator {
       return `data: ${JSON.stringify({ error: (parsed.error ?? parsed) as unknown })}\n\ndata: [DONE]\n\n`
     }
 
+    if (eventName === 'response.function_call_arguments.done') {
+      return ''
+    }
+
     this.stat.unknownEvents += 1
+    if (!this.unknownKindSeen.has(eventName) && this.unknownKindSeen.size < 10) {
+      this.unknownKindSeen.add(eventName)
+      this.stat.unknownKinds.push(eventName)
+    }
     return ''
   }
 
