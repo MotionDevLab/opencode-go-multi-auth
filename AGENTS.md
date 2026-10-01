@@ -228,7 +228,10 @@ Key invariants to preserve:
   the next key — the 200 headers and partial body are already
   committed to the client. Keep the threshold generous (minutes, not
   seconds): long model reasoning gaps with zero chunks are
-  indistinguishable from a hung stream.
+  indistinguishable from a hung stream. Translated streams also carry
+  translatedIn/Out/Tools counters; any nonzero unknown/parseErrors,
+  a missing terminal event, or an incomplete terminal emits
+  a `translation anomaly` warn.
 
 ## Quota handling — react, do not predict
 

@@ -16,7 +16,7 @@ import {
   type QuotaErrorSignal,
 } from '../router/types.js'
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
-import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator } from './zen-responses.js'
+import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator, type TranslatorStats } from './zen-responses.js'
 import { isLocalNetworkOutage, isQuota429, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
 import { estimateCost } from './rate-card.js'
@@ -53,6 +53,7 @@ interface StreamPipeStats {
   chunks: number
   bytes: number
   idleAborted: boolean
+  translate?: TranslatorStats
 }
 
 // Node setTimeout delays overflow past 2^31-1ms to ~1ms. The dashboard caps
@@ -602,6 +603,29 @@ export class ProxyServer {
           return
         }
 
+        const tr = streamStats?.translate
+        if (tr && (tr.unknownEvents > 0 || tr.parseErrors > 0 || !tr.sawTerminal || tr.terminalKind === 'response.incomplete')) {
+          const anomalyReason = !tr.sawTerminal
+            ? `no terminal event (${tr.eventsIn} in, ${tr.framesOut} out)`
+            : tr.terminalKind === 'response.incomplete'
+              ? `truncated turn (${tr.toolFramesOut} tool frames in flight)`
+              : `unknown=${tr.unknownEvents} parseErrors=${tr.parseErrors}`
+          this.logStream.emit(this.logger, 'warn', `${req.method} ${targetPath} -> translation anomaly (${anomalyReason})`, {
+            method: req.method,
+            path: targetPath,
+            statusCode: upstreamRes.status,
+            keyAlias: key.alias,
+            keyId: key.id,
+            model: prepared.model,
+            strategy,
+            sessionId: upstreamSessionId ?? sessionKey ?? null,
+            upstream: isZenRequest ? 'zen' : 'go',
+            translatedIn: tr.eventsIn,
+            translatedOut: tr.framesOut,
+            translatedTools: tr.toolFramesOut,
+          })
+        }
+
         const responseBody = await responseTextPromise
         const usageData = parseUsageData(responseBody, prepared.model ?? undefined)
         const tokens = usageData?.tokens ?? null
@@ -650,6 +674,9 @@ export class ProxyServer {
           ttfbMs: streamStats?.ttfbMs ?? null,
           maxIdleGapMs: streamStats?.maxIdleGapMs ?? null,
           streamChunks: streamStats?.chunks ?? null,
+          translatedIn: streamStats?.translate?.eventsIn ?? null,
+          translatedOut: streamStats?.translate?.framesOut ?? null,
+          translatedTools: streamStats?.translate?.toolFramesOut ?? null,
           upstream: isZenRequest ? 'zen' : 'go',
         })
         return
@@ -924,6 +951,7 @@ export class ProxyServer {
           await reader.cancel().catch(() => {})
           abortUpstream?.(new Error(`SSE stream idle for ${idleTimeoutMs}ms`))
           res.destroy()
+          stats.translate = translator.stats()
           return stats
         }
         if (chunk.done) break
@@ -947,9 +975,11 @@ export class ProxyServer {
       processBuffer()
       if (buffered.trim()) processEvent(buffered)
       res.end()
+      stats.translate = translator.stats()
       return stats
     } catch {
       res.end()
+      stats.translate = translator.stats()
       return stats
     }
   }

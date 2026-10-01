@@ -320,6 +320,16 @@ export function toChatCompletion(payload: string): string {
   })
 }
 
+export interface TranslatorStats {
+  eventsIn: number
+  framesOut: number
+  toolFramesOut: number
+  unknownEvents: number
+  parseErrors: number
+  sawTerminal: boolean
+  terminalKind: string | null
+}
+
 /**
  * Translate one Responses SSE event into zero or more chat.completion.chunk
  * SSE frames. Stateful only in the sense that the caller feeds events in
@@ -345,11 +355,29 @@ export class SseTranslator {
     this.includeUsage = includeUsage
   }
 
+  private readonly stat: TranslatorStats = {
+    eventsIn: 0, framesOut: 0, toolFramesOut: 0,
+    unknownEvents: 0, parseErrors: 0,
+    sawTerminal: false, terminalKind: null,
+  }
+
+  stats(): TranslatorStats {
+    return { ...this.stat }
+  }
+
   translate(eventName: string, data: string): string {
+    this.stat.eventsIn += 1
+    const out = this.translateInner(eventName, data)
+    if (out) this.stat.framesOut += (out.match(/^data: /gm) || []).length
+    return out
+  }
+
+  private translateInner(eventName: string, data: string): string {
     let parsed: Record<string, unknown>
     try {
       parsed = JSON.parse(data)
     } catch {
+      this.stat.parseErrors += 1
       return ''
     }
 
@@ -380,6 +408,7 @@ export class SseTranslator {
       if (known !== undefined) return ''
       const index = this.toolCallIndex++
       if (key !== null) this.streamedToolCalls.set(key, index)
+      this.stat.toolFramesOut += 1
       return this.frame({
         tool_calls: [
           {
@@ -399,6 +428,7 @@ export class SseTranslator {
       if (key !== null && this.streamedToolCalls.has(key)) return ''
       const index = this.toolCallIndex++
       if (key !== null) this.streamedToolCalls.set(key, index)
+      this.stat.toolFramesOut += 1
       return this.frame({
         tool_calls: [
           {
@@ -420,6 +450,7 @@ export class SseTranslator {
         index = this.toolCallIndex++
         if (key !== null) this.streamedToolCalls.set(key, index)
       }
+      this.stat.toolFramesOut += 1
       return this.frame({
         tool_calls: [{ index, function: { arguments: delta } }],
       }, null)
@@ -435,13 +466,18 @@ export class SseTranslator {
       const response = parsed.response as Record<string, unknown> | undefined
       const reason = this.toolCallIndex > 0 ? 'tool_calls' : finishReason(response?.status)
       const usage = this.includeUsage ? mapUsage(response?.usage) : undefined
+      this.stat.sawTerminal = true
+      this.stat.terminalKind = eventName
       return this.frame({}, reason) + this.usageFrame(usage) + 'data: [DONE]\n\n'
     }
 
     if (eventName === 'response.failed' || eventName === 'error') {
+      this.stat.sawTerminal = true
+      this.stat.terminalKind = eventName
       return `data: ${JSON.stringify({ error: (parsed.error ?? parsed) as unknown })}\n\ndata: [DONE]\n\n`
     }
 
+    this.stat.unknownEvents += 1
     return ''
   }
 
