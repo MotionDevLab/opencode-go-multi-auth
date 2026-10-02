@@ -56,6 +56,7 @@ function loadEnvConfig(): Partial<RouterConfig> {
     circuitBreakerRecoveryMs: Number(process.env.CIRCUIT_BREAKER_RECOVERY_MS) || DEFAULT_CONFIG.circuitBreakerRecoveryMs,
     breakerSelfCancelMs: Number(process.env.BREAKER_SELF_CANCEL_MS) || DEFAULT_CONFIG.breakerSelfCancelMs,
     burstFailoverEnabled: readBoolean(process.env.BURST_FAILOVER_ENABLED, DEFAULT_CONFIG.burstFailoverEnabled),
+    codeafCompatEnabled: readBoolean(process.env.CODEAF_COMPAT_ENABLED, DEFAULT_CONFIG.codeafCompatEnabled),
     honorRetryAfter: readBoolean(process.env.HONOR_RETRY_AFTER, DEFAULT_CONFIG.honorRetryAfter),
     retryAfterCapMs: Number(process.env.RETRY_AFTER_CAP_MS) || DEFAULT_CONFIG.retryAfterCapMs,
     windowFailures: Number(process.env.WINDOW_FAILURES) || DEFAULT_CONFIG.windowFailures,
@@ -80,6 +81,12 @@ export async function createRouter(
 
   const configStore = new ConfigStore(mergedConfig.configDir)
   const secureStore = new SecureStore(mergedConfig.configDir)
+  // Boot-time env override for the compat toggle: tuning fields are otherwise
+  // store-driven (getTuning reads the store per request), so without this the
+  // CODEAF_COMPAT_ENABLED env would be dead after ConfigStore loads the file.
+  if (process.env.CODEAF_COMPAT_ENABLED !== undefined) {
+    configStore.set('codeafCompatEnabled', mergedConfig.codeafCompatEnabled)
+  }
   const runtimeStateStore = new RuntimeStateStore(mergedConfig.configDir)
   const logger = createLogger(mergedConfig.logLevel)
 
@@ -99,6 +106,7 @@ export async function createRouter(
         quota: quotaTracker.exportState(),
         logs: logStream.export(),
         affinity: proxyServer.exportAffinity(),
+        codeafShimSessionId,
       })
     }, 100)
   }
@@ -130,6 +138,8 @@ export async function createRouter(
   keyManager.loadRuntimeState(runtimeState.keys)
   quotaTracker.loadState(runtimeState.quota)
   logStream.load(runtimeState.logs)
+  let codeafShimSessionId: string | undefined =
+    typeof runtimeState.codeafShimSessionId === 'string' ? runtimeState.codeafShimSessionId : undefined
   persistReady = true
 
   const notifier = new NtfyNotifier(mergedConfig.ntfyUrl)
@@ -159,6 +169,11 @@ export async function createRouter(
     () => tuningFromConfig(configStore.getAll()),
     notifier,
     persistRuntimeState,
+    () => codeafShimSessionId,
+    (sid: string) => {
+      codeafShimSessionId = sid
+      persistRuntimeState()
+    },
   )
   proxyServer.loadPersistedAffinity(runtimeState.affinity)
 
@@ -206,6 +221,7 @@ export async function createRouter(
         quota: quotaTracker.exportState(),
         logs: logStream.export(),
         affinity: proxyServer.exportAffinity(),
+        codeafShimSessionId,
       })
       await proxyServer.stop()
       await dashboardServer.stop()

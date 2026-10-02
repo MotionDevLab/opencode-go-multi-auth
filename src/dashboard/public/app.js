@@ -148,7 +148,7 @@ const state = {
   recentLogs: [],          // ring buffer
   archivedLogs: [],        // up to 10000 older entries
   expandedLogId: null,
-  logFilter: { search: '', level: '', provider: '' },
+  logFilter: { search: '', level: '', provider: '', harness: '' },
   paused: false,
   pausedBuffer: [],
   logById: new Map(),      // id -> log entry, for finding expanded row
@@ -1346,7 +1346,7 @@ async function renderFailoverTuning() {
     host.innerHTML = '<div class="empty-state">Failover tuning unavailable.</div>';
     return;
   }
-  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-sse-enabled', '#ft-sse-idle', '#ft-burst', '#ft-retry-after'];
+  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-sse-enabled', '#ft-sse-idle', '#ft-burst', '#ft-retry-after', '#ft-codeaf'];
   const ftDomSnapshot = () => {
     if (!$('#ft-threshold')) return null;
     return ftFields.map((id) => {
@@ -1365,6 +1365,7 @@ async function renderFailoverTuning() {
     Math.round((t.sseIdleTimeoutMs || 0) / 1000),
     !!t.burstFailoverEnabled,
     !!t.honorRetryAfter,
+    !!t.codeafCompatEnabled,
   ].join('|');
   // The snapshot poller re-renders this page every 5s. Never rebuild the form
   // while the user has unsaved edits — that is what was wiping typed values.
@@ -1430,6 +1431,9 @@ async function renderFailoverTuning() {
             <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header (clamped between Recovery and the cap) as the exile length instead of the flat Recovery value.">
               <input type="checkbox" class="ft-input" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
             </label>
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Fill OpenCode identity (User-Agent, session id, bash/read tool stubs) on Zen free-model requests from non-OpenCode clients so harnesses like CodeAF pass the free-tier gate. OpenCode and paid traffic are never touched. Applies per-request, no restart.">
+              <input type="checkbox" class="ft-input" id="ft-codeaf" ${t.codeafCompatEnabled ? 'checked' : ''}> CodeAF compat
+            </label>
             <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
             <span id="ft-dirty" class="ft-dirty" hidden>● unsaved changes</span>
           </div>
@@ -1470,6 +1474,7 @@ async function renderFailoverTuning() {
       sseIdleTimeoutMs: sseOn ? sseSecs * 1000 : 0,
       burstFailoverEnabled: $('#ft-burst').checked,
       honorRetryAfter: $('#ft-retry-after').checked,
+      codeafCompatEnabled: $('#ft-codeaf').checked,
     };
     const diffBits = [];
     const prev = state.failoverTuning || {};
@@ -1482,6 +1487,7 @@ async function renderFailoverTuning() {
     if ((payload.sseIdleTimeoutMs || 0) !== (prev.sseIdleTimeoutMs || 0)) diffBits.push(`Stream watchdog ${payload.sseIdleTimeoutMs ? fmtS(payload.sseIdleTimeoutMs) : 'off'}`);
     if (payload.burstFailoverEnabled !== prev.burstFailoverEnabled) diffBits.push(`Burst-failover ${payload.burstFailoverEnabled ? 'on' : 'off'}`);
     if (payload.honorRetryAfter !== prev.honorRetryAfter) diffBits.push(`Honor Retry-After ${payload.honorRetryAfter ? 'on' : 'off'}`);
+    if (payload.codeafCompatEnabled !== prev.codeafCompatEnabled) diffBits.push(`CodeAF compat ${payload.codeafCompatEnabled ? 'on' : 'off'}`);
     if (diffBits.length === 0) {
       toast('Already at these values — nothing saved', 'info');
       renderFailoverTuning();
@@ -1513,10 +1519,11 @@ function getFilteredLogs() {
   const search = state.logFilter.search.trim().toLowerCase();
   const level = state.logFilter.level;
   const provider = state.logFilter.provider;
+  const harness = state.logFilter.harness;
   // Stored oldest-first; display newest-first.
   const chronological = [...state.archivedLogs, ...state.recentLogs];
   let filtered;
-  if (!search && !level && !provider) {
+  if (!search && !level && !provider && !harness) {
     filtered = chronological;
   } else {
     filtered = chronological.filter((e) => {
@@ -1526,6 +1533,7 @@ function getFilteredLogs() {
         if ((e.level || 'info') !== level) return false;
       }
       if (provider && (e.meta?.upstream || '') !== provider) return false;
+      if (harness && (e.meta?.harness || '') !== harness) return false;
       if (!search) return true;
       const m = e.meta || {};
       const haystack = [
@@ -1537,6 +1545,7 @@ function getFilteredLogs() {
         m.routeReason || '',
         m.statusCode || '',
         m.upstream || '',
+        m.harness || '',
         m.quotaError?.message || '',
       ].join(' ').toLowerCase();
       return haystack.includes(search);
@@ -1578,10 +1587,14 @@ function renderLogRowHTML(entry, idx) {
   const upstreamPill = upstream
     ? ` <span class="upstream-pill upstream-${escapeHtml(upstream)}" title="Routed to ${upstream === 'zen' ? 'OpenCode Zen (free tier)' : 'OpenCode Go (paid)'}">${upstream.toUpperCase()}</span>`
     : '';
+  const harnessName = m.harness || '';
+  const harnessPill = harnessName
+    ? ` <span class="upstream-pill" title="Client harness: ${harnessName === 'codeaf' ? 'CodeAF via compat shim' : harnessName === 'opencode' ? 'OpenCode client' : 'unrecognized client'}">${escapeHtml(harnessName.toUpperCase())}</span>`
+    : '';
   return `
     <div class="log-row${expandedClass}${quotaClass}" data-log-id="${entry.__id}" data-log-idx="${idx}" style="top:${top}px;">
       <span class="cell time">${escapeHtml(fmtTime(entry.timestamp))}</span>
-      <span class="cell level level-${escapeHtml(entry.level || 'info')}">${escapeHtml((entry.level || 'info').toUpperCase())}${quotaPill}${upstreamPill}</span>
+      <span class="cell level level-${escapeHtml(entry.level || 'info')}">${escapeHtml((entry.level || 'info').toUpperCase())}${quotaPill}${upstreamPill}${harnessPill}</span>
       <span class="cell method">${escapeHtml(m.method || '')}</span>
       <span class="cell path" title="${escapeHtml(m.path || '')}">${escapeHtml(m.path || '')}</span>
       <span class="cell status ${statusClass}">${escapeHtml(status ? String(status) : '')}</span>
@@ -1807,6 +1820,16 @@ function initSearch() {
       $$('#logs-provider .filter-chip').forEach((c) => c.classList.remove('active'));
       chip.classList.add('active');
       state.logFilter.provider = chip.dataset.provider || '';
+      ensureLogRender();
+    });
+  });
+
+  // Harness filter chips (CodeAF / OpenCode / Unknown / All)
+  $$('#logs-harness .filter-chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      $$('#logs-harness .filter-chip').forEach((c) => c.classList.remove('active'));
+      chip.classList.add('active');
+      state.logFilter.harness = chip.dataset.harness || '';
       ensureLogRender();
     });
   });

@@ -266,6 +266,7 @@ export class DashboardServer {
       this.configStore.set('circuitBreakerRecoveryMs', tuning.circuitBreakerRecoveryMs)
       this.configStore.set('breakerSelfCancelMs', tuning.breakerSelfCancelMs)
       this.configStore.set('burstFailoverEnabled', tuning.burstFailoverEnabled)
+      this.configStore.set('codeafCompatEnabled', tuning.codeafCompatEnabled)
       this.configStore.set('honorRetryAfter', tuning.honorRetryAfter)
       this.configStore.set('retryAfterCapMs', tuning.retryAfterCapMs)
       this.configStore.set('windowFailures', tuning.windowFailures)

@@ -16,6 +16,7 @@ import {
   type QuotaErrorSignal,
 } from '../router/types.js'
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
+import { applyCodeafCompat, type HarnessStamp } from './codeaf-compat.js'
 import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator, type TranslatorStats } from './zen-responses.js'
 import { isLocalNetworkOutage, isQuota429, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
@@ -149,6 +150,8 @@ export class ProxyServer {
     private getTuning: () => FailoverTuning,
     private notifier: NtfyNotifier = new NtfyNotifier(),
     private onAffinityChange?: () => void,
+    private getShimSessionId: () => string | undefined = () => undefined,
+    private setShimSessionId: (sid: string) => void = () => {},
   ) {
     this.config = config
     this.sessionAffinity = new SessionAffinityStore()
@@ -196,7 +199,7 @@ export class ProxyServer {
     let translateZenResponses: boolean = false
     let includeUsage: boolean = false
     const headers = req.headers as Record<string, string | string[] | undefined>
-    const body = await this.readBody(req)
+    let body = await this.readBody(req)
     if (body === null) {
       // readBody returns null only when the client disconnected or the
       // request stream errored before the body was received. The
@@ -211,6 +214,23 @@ export class ProxyServer {
     let requestBody = body
     const isZenChatCompletions = isZenRequest && req.method === 'POST' && req.url && isChatCompletionsPath(req.url.split('?')[0])
     const requestModel = this.extractModelName(body)
+    // CodeAF compat shim (default-off, zen free models only): additive
+    // OpenCode-identity fills for non-OpenCode clients. Runs before the
+    // Responses translation below so memo + retry paths inherit the fills.
+    const compat = applyCodeafCompat({
+      enabled: this.getTuning().codeafCompatEnabled,
+      targetPath,
+      headers,
+      body,
+      model: requestModel,
+      getShimSessionId: this.getShimSessionId,
+      setShimSessionId: this.setShimSessionId,
+    })
+    if (compat.body !== body) {
+      body = compat.body
+      requestBody = compat.body
+    }
+    const harness = compat.harness
     if (isZenChatCompletions && requestModel && req.url && this.zenResponsesModelMemo.has(requestModel)) {
       const translatedBody = toResponsesRequestBody(body)
       if (translatedBody) {
@@ -289,6 +309,7 @@ export class ProxyServer {
           this.logStream.emit(this.logger, 'warn',
             `Key switch to "${key.alias}": stripped ${stripped.removed} encrypted_content block(s) so the new key can continue the session`, {
               method: req.method,
+              harness,
               path: targetPath,
               keyAlias: key.alias,
               keyId: key.id,
@@ -373,6 +394,7 @@ export class ProxyServer {
             this.logStream.emit(this.logger, 'info',
               `Zen chat/completions ${upstreamRes.status} for "${requestModel}" - wrong-protocol suspect, translating via /responses on "${key.alias}" (one-time per model per boot)`, {
                 method: req.method,
+                harness,
                 path: targetPath,
                 statusCode: upstreamRes.status,
                 keyAlias: key.alias,
@@ -452,6 +474,7 @@ export class ProxyServer {
               `Key "${key.alias}" quota exhausted (HTTP ${upstreamRes.status}), cooldown ${cooldownHours}h, failing over`,
               {
                 method: req.method,
+                harness,
                 path: targetPath,
                 statusCode: upstreamRes.status,
                 keyAlias: key.alias,
@@ -495,7 +518,7 @@ export class ProxyServer {
           attemptedKeyIds.add(key.id)
 
           if (circuitState === CircuitState.OPEN) {
-            await this.emitCircuitOpen(key, req.method, upstreamRes.status, targetPath, prepared.model, strategy, reason, isZenRequest)
+            await this.emitCircuitOpen(key, req.method, upstreamRes.status, targetPath, prepared.model, strategy, reason, isZenRequest, harness)
           }
 
           if (attempt < maxAttempts - 1) {
@@ -511,7 +534,7 @@ export class ProxyServer {
             const circuitState = this.circuitBreaker.recordFailure(key.id, recoveryOverride)
             this.keyManager.markError(key.id)
             if (circuitState === CircuitState.OPEN) {
-              await this.emitCircuitOpen(key, req.method, upstreamRes.status, targetPath, prepared.model, strategy, reason, isZenRequest)
+              await this.emitCircuitOpen(key, req.method, upstreamRes.status, targetPath, prepared.model, strategy, reason, isZenRequest, harness)
             }
           }
         } else if (upstreamRes.status < 400) {
@@ -521,6 +544,7 @@ export class ProxyServer {
             await this.notifier.circuitRecovered(key.alias)
             this.logStream.emit(this.logger, 'info', `Circuit breaker CLOSED for key "${key.alias}" (probe succeeded)`, {
               method: req.method,
+              harness,
               path: targetPath,
               keyAlias: key.alias,
               keyId: key.id,
@@ -585,6 +609,7 @@ export class ProxyServer {
           attemptedKeyIds.add(key.id)
           this.logStream.emit(this.logger, 'warn', `${req.method} ${targetPath} -> stream stalled (${streamStats.maxIdleGapMs}ms silence), aborted`, {
             method: req.method,
+            harness,
             path: targetPath,
             statusCode: upstreamRes.status,
             keyAlias: key.alias,
@@ -612,6 +637,7 @@ export class ProxyServer {
               : `unknown=${tr.unknownEvents}${tr.unknownKinds.length ? ` (${tr.unknownKinds.join(',')})` : ''} parseErrors=${tr.parseErrors}`
           this.logStream.emit(this.logger, 'warn', `${req.method} ${targetPath} -> translation anomaly (${anomalyReason})`, {
             method: req.method,
+            harness,
             path: targetPath,
             statusCode: upstreamRes.status,
             keyAlias: key.alias,
@@ -659,6 +685,7 @@ export class ProxyServer {
         const level = upstreamRes.status >= 500 ? 'error' : upstreamRes.status >= 400 ? 'warn' : 'info'
         this.logStream.emit(this.logger, level, `${req.method} ${targetPath} -> ${upstreamRes.status}`, {
           method: req.method,
+          harness,
           path: targetPath,
           statusCode: upstreamRes.status,
           keyAlias: key.alias,
@@ -700,6 +727,7 @@ export class ProxyServer {
           lastError = `local network unreachable (${lastError}) — check Wi-Fi/VPN, keys untouched`
           this.logStream.emit(this.logger, 'warn', `Local network unreachable, key "${key.alias}" untouched`, {
             method: req.method,
+            harness,
             path: targetPath,
             keyAlias: key.alias,
             keyId: key.id,
@@ -729,6 +757,7 @@ export class ProxyServer {
         attemptedKeyIds.add(key.id)
         this.logStream.emit(this.logger, 'error', `Upstream error for key "${key.alias}": ${lastError}`, {
           method: req.method,
+          harness,
           path: targetPath,
           keyAlias: key.alias,
           keyId: key.id,
@@ -760,6 +789,7 @@ export class ProxyServer {
     strategy: RoutingStrategy,
     reason: string,
     isZenRequest: boolean,
+    harness: HarnessStamp,
   ): Promise<void> {
     const failures = Math.max(
       this.circuitBreaker.getConsecutiveErrors(key.id),
@@ -768,6 +798,7 @@ export class ProxyServer {
     await this.notifier.circuitTripped(key.alias, failures)
     this.logStream.emit(this.logger, 'error', `Circuit breaker OPEN for key "${key.alias}"`, {
       method,
+      harness,
       path: targetPath,
       keyAlias: key.alias,
       keyId: key.id,

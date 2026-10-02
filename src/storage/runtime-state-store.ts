@@ -70,6 +70,7 @@ export interface RouterRuntimeState {
   quota: StoredQuotaEntry[]
   logs: StoredLogEntry[]
   affinity: StoredSessionAffinity[]
+  codeafShimSessionId?: string
 }
 
 const CURRENT_VERSION = 2
@@ -99,6 +100,7 @@ export class RuntimeStateStore {
         quota: Array.isArray(parsed.quota) ? parsed.quota : [],
         logs: Array.isArray(parsed.logs) ? parsed.logs : [],
         affinity: Array.isArray(parsed.affinity) ? parsed.affinity : [],
+        codeafShimSessionId: typeof parsed.codeafShimSessionId === 'string' ? parsed.codeafShimSessionId : undefined,
       }
     } catch {
       return this.emptyState()
@@ -112,6 +114,7 @@ export class RuntimeStateStore {
       quota: state.quota,
       logs: state.logs,
       affinity: state.affinity,
+      codeafShimSessionId: state.codeafShimSessionId,
     }
     fs.writeFileSync(this.filePath, JSON.stringify(payload, null, 2), 'utf8')
   }
@@ -123,6 +126,7 @@ export class RuntimeStateStore {
       quota: [],
       logs: [],
       affinity: [],
+      codeafShimSessionId: undefined,
     }
   }
 }

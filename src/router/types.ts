@@ -80,6 +80,7 @@ export interface RouterConfig {
   circuitBreakerRecoveryMs: number
   breakerSelfCancelMs: number
   burstFailoverEnabled: boolean
+  codeafCompatEnabled: boolean
   honorRetryAfter: boolean
   retryAfterCapMs: number
   windowFailures: number
@@ -158,6 +159,7 @@ export const DEFAULT_CONFIG: RouterConfig = {
   circuitBreakerRecoveryMs: 120_000,
   breakerSelfCancelMs: 0,
   burstFailoverEnabled: true,
+  codeafCompatEnabled: false,
   honorRetryAfter: true,
   retryAfterCapMs: 300_000,
   windowFailures: 12,
@@ -185,6 +187,7 @@ export interface FailoverTuning {
   circuitBreakerRecoveryMs: number
   breakerSelfCancelMs: number
   burstFailoverEnabled: boolean
+  codeafCompatEnabled: boolean
   honorRetryAfter: boolean
   retryAfterCapMs: number
   windowFailures: number
@@ -231,7 +234,7 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
   if (sseIdle !== 0 && (sseIdle < 30_000 || sseIdle > 900_000)) {
     return { ok: false, error: 'sseIdleTimeoutMs must be 0 or between 30000 and 900000' }
   }
-  for (const name of ['burstFailoverEnabled', 'honorRetryAfter']) {
+  for (const name of ['burstFailoverEnabled', 'honorRetryAfter', 'codeafCompatEnabled']) {
     if (typeof v[name] !== 'boolean') return { ok: false, error: `${name} must be a boolean` }
   }
   return {
@@ -241,6 +244,7 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
       circuitBreakerRecoveryMs: v.circuitBreakerRecoveryMs as number,
       breakerSelfCancelMs: selfCancel,
       burstFailoverEnabled: v.burstFailoverEnabled as boolean,
+      codeafCompatEnabled: v.codeafCompatEnabled as boolean,
       honorRetryAfter: v.honorRetryAfter as boolean,
       retryAfterCapMs: v.retryAfterCapMs as number,
       windowFailures: v.windowFailures as number,
@@ -256,6 +260,7 @@ export function tuningFromConfig(config: RouterConfig): FailoverTuning {
     circuitBreakerRecoveryMs: config.circuitBreakerRecoveryMs,
     breakerSelfCancelMs: config.breakerSelfCancelMs,
     burstFailoverEnabled: config.burstFailoverEnabled,
+    codeafCompatEnabled: config.codeafCompatEnabled,
     honorRetryAfter: config.honorRetryAfter,
     retryAfterCapMs: config.retryAfterCapMs,
     windowFailures: config.windowFailures,
