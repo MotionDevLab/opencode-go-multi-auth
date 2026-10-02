@@ -237,6 +237,16 @@ Session stickiness is applied before any strategy. If a warm session key is dete
 
 Note: the legacy `priority_spillover` and `highest_remaining_quota` strategies were removed when the router stopped estimating quota. Stored values for those strategies are mapped to `priority_failover` for backward compatibility.
 
+## Sharing the pool between harnesses (OpenCode + CodeAF)
+
+Both harnesses share one key pool, one strategy, and one session-affinity store. The `harness` label (`codeaf` / `opencode` / `unknown`) is log metadata only — key selection never branches on it.
+
+1. **Stickiness first.** `x-session-id` → `x-opencode-session` → cache keys. A session with a warm key (< 20 min) reuses it. CodeAF sends one shared shim session id, so all CodeAF turns pin to one warm key; OpenCode sends one session id per conversation and pins independently. Under `priority_failover` both normally converge on the same highest-priority active key — two harnesses on one key is the expected state, not an accident.
+2. **Strategy second.** On a stickiness miss the global strategy picks. Both harnesses obey the same rule.
+3. **Failover is account-wide.** A quota 429 exiles the key for every harness (cooldown from the upstream, `COOLDOWN_MS` fallback); the next attempt from either harness walks to the next key, with `encrypted_content` stripped so conversations continue. Circuit-breaker errors are likewise per-key, not per-harness.
+
+There is no isolation: CodeAF burn consumes the same account quota OpenCode draws from, and a cooldown tripped by either harness degrades both. To protect interactive use during long CodeAF batch jobs, spread load via Strategy + key priorities (e.g. round-robin, or weighted with a reserve key) — a dashboard change, no restart needed.
+
 ## Routing Tape (Log Viewer)
 
 Each log entry now includes rich metadata visible in the UI and file logs:
