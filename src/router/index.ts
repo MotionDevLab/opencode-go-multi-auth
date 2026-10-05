@@ -106,7 +106,7 @@ export async function createRouter(
         quota: quotaTracker.exportState(),
         logs: logStream.export(),
         affinity: proxyServer.exportAffinity(),
-        codeafShimSessionId,
+        shimSessionIds,
       })
     }, 100)
   }
@@ -138,8 +138,8 @@ export async function createRouter(
   keyManager.loadRuntimeState(runtimeState.keys)
   quotaTracker.loadState(runtimeState.quota)
   logStream.load(runtimeState.logs)
-  let codeafShimSessionId: string | undefined =
-    typeof runtimeState.codeafShimSessionId === 'string' ? runtimeState.codeafShimSessionId : undefined
+  let shimSessionIds: Record<string, string> =
+    runtimeState.shimSessionIds && typeof runtimeState.shimSessionIds === 'object' ? runtimeState.shimSessionIds : {}
   persistReady = true
 
   const notifier = new NtfyNotifier(mergedConfig.ntfyUrl)
@@ -169,9 +169,9 @@ export async function createRouter(
     () => tuningFromConfig(configStore.getAll()),
     notifier,
     persistRuntimeState,
-    () => codeafShimSessionId,
-    (sid: string) => {
-      codeafShimSessionId = sid
+    (client: string) => shimSessionIds[client],
+    (client: string, sid: string) => {
+      shimSessionIds[client] = sid
       persistRuntimeState()
     },
   )
@@ -221,7 +221,7 @@ export async function createRouter(
         quota: quotaTracker.exportState(),
         logs: logStream.export(),
         affinity: proxyServer.exportAffinity(),
-        codeafShimSessionId,
+        shimSessionIds,
       })
       await proxyServer.stop()
       await dashboardServer.stop()
