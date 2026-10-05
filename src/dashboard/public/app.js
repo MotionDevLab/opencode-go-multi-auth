@@ -396,6 +396,7 @@ function ingestLog(entry, { initial = false } = {}) {
   if (state.currentPage === 'tokens') {
     scheduleTokensRender();
   }
+  renderHarnessOptions();
 }
 
 // ---------------------------------------------------------------------------
@@ -1431,8 +1432,8 @@ async function renderFailoverTuning() {
             <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header (clamped between Recovery and the cap) as the exile length instead of the flat Recovery value.">
               <input type="checkbox" class="ft-input" id="ft-retry-after" ${t.honorRetryAfter ? 'checked' : ''}> Honor Retry-After
             </label>
-            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Fill OpenCode identity (User-Agent, session id, bash/read tool stubs) on Zen free-model requests from non-OpenCode clients so harnesses like CodeAF pass the free-tier gate. OpenCode and paid traffic are never touched. Applies per-request, no restart.">
-              <input type="checkbox" class="ft-input" id="ft-codeaf" ${t.codeafCompatEnabled ? 'checked' : ''}> CodeAF compat
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Fill OpenCode identity (User-Agent, session id, bash/read tool stubs) on Zen free-model requests from non-OpenCode clients so harnesses like CodeAF and OpenClaude pass the free-tier gate. OpenCode and paid traffic are never touched. Applies per-request, no restart.">
+              <input type="checkbox" class="ft-input" id="ft-codeaf" ${t.codeafCompatEnabled ? 'checked' : ''}> Non-OpenCode harness compat
             </label>
             <button class="btn btn-primary btn-sm" id="ft-save">Save tuning</button>
             <span id="ft-dirty" class="ft-dirty" hidden>● unsaved changes</span>
@@ -1588,8 +1589,10 @@ function renderLogRowHTML(entry, idx) {
     ? ` <span class="upstream-pill upstream-${escapeHtml(upstream)}" title="Routed to ${upstream === 'zen' ? 'OpenCode Zen (free tier)' : 'OpenCode Go (paid)'}">${upstream.toUpperCase()}</span>`
     : '';
   const harnessName = m.harness || '';
-  const harnessPill = harnessName
-    ? ` <span class="upstream-pill" title="Client harness: ${harnessName === 'codeaf' ? 'CodeAF via compat shim' : harnessName === 'opencode' ? 'OpenCode client' : 'unrecognized client'}">${escapeHtml(harnessName.toUpperCase())}</span>`
+  const hm = harnessName ? harnessMeta(harnessName) : null;
+  const shimNote = m.compatApplied ? ' · compat fills applied' : '';
+  const harnessPill = hm
+    ? ` <span class="upstream-pill" title="${escapeHtml(hm.blurb + shimNote)}">${escapeHtml(hm.label.toUpperCase())}</span>`
     : '';
   return `
     <div class="log-row${expandedClass}${quotaClass}" data-log-id="${entry.__id}" data-log-idx="${idx}" style="top:${top}px;">
@@ -1693,6 +1696,7 @@ function initLogsToolbar() {
     state.expandedLogId = null;
     logPage = 1;
     logFollow = true;
+    renderHarnessOptions();
     ensureLogRender();
   });
   $('#logs-download').addEventListener('click', () => {
@@ -1795,6 +1799,46 @@ function initLogsToolbar() {
   });
 }
 
+// Harness picker source of truth. Known ids carry labels; any other id
+// seen in loaded logs is appended automatically (uppercased) so a new
+// harness needs zero UI work — it appears here once stamped.
+const HARNESSES = [
+  { id: 'codeaf', label: 'CodeAF', blurb: 'CodeAF client' },
+  { id: 'openclaude', label: 'OpenClaude', blurb: 'OpenClaude client' },
+  { id: 'opencode', label: 'OpenCode', blurb: 'OpenCode client' },
+  { id: 'unknown', label: 'Unknown', blurb: 'Unrecognized client' },
+];
+
+function harnessMeta(id) {
+  const known = HARNESSES.find((h) => h.id === id);
+  if (known) return known;
+  return { id, label: String(id).toUpperCase(), blurb: `Client harness: ${id}` };
+}
+
+let lastHarnessSig = '';
+function renderHarnessOptions() {
+  const select = document.getElementById('logs-harness-select');
+  if (!select) return;
+  const chronological = [...state.archivedLogs, ...state.recentLogs];
+  const counts = {};
+  for (const e of chronological) {
+    const h = e.meta?.harness || '';
+    if (!h) continue;
+    counts[h] = (counts[h] || 0) + 1;
+  }
+  const seen = Object.keys(counts).filter((id) => !HARNESSES.some((h) => h.id === id));
+  // Signature guard: ingestLog() fires per entry (500-entry backfills!), so
+  // skip the innerHTML rebuild unless the id set or counts actually changed.
+  const sig = [...HARNESSES.map((h) => h.id), ...seen].sort().join('|') + '#' + JSON.stringify(counts);
+  if (sig === lastHarnessSig) return;
+  lastHarnessSig = sig;
+  const current = state.logFilter.harness || '';
+  select.innerHTML = `<option value="">All (${chronological.length})</option>` +
+    [...HARNESSES, ...seen.map((id) => harnessMeta(id))]
+      .map((h) => `<option value="${escapeHtml(h.id)}" title="${escapeHtml(h.blurb)}"${h.id === current ? ' selected' : ''}>${escapeHtml(h.label)}${counts[h.id] ? ` (${counts[h.id]})` : ''}</option>`)
+      .join('');
+}
+
 function initSearch() {
   const input = $('#logs-search');
   if (!input) return;
@@ -1824,14 +1868,10 @@ function initSearch() {
     });
   });
 
-  // Harness filter chips (CodeAF / OpenCode / Unknown / All)
-  $$('#logs-harness .filter-chip').forEach((chip) => {
-    chip.addEventListener('click', () => {
-      $$('#logs-harness .filter-chip').forEach((c) => c.classList.remove('active'));
-      chip.classList.add('active');
-      state.logFilter.harness = chip.dataset.harness || '';
-      ensureLogRender();
-    });
+  // Harness picker (single-select dropdown; '' = All)
+  document.getElementById('logs-harness-select')?.addEventListener('change', (ev) => {
+    state.logFilter.harness = ev.target.value || '';
+    ensureLogRender();
   });
 }
 

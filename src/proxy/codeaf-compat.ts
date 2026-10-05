@@ -7,7 +7,34 @@ import crypto from 'node:crypto'
 // paths + `-free` models + a default-off toggle; OpenCode and paid traffic
 // pass through byte-identical.
 
-export type HarnessStamp = 'codeaf' | 'opencode' | 'unknown'
+export type HarnessStamp = 'codeaf' | 'openclaude' | 'opencode' | 'unknown'
+
+export interface HarnessRule {
+  token: string
+  id: Exclude<HarnessStamp, 'unknown'>
+  label: string
+  blurb: string
+}
+
+// First match wins: keep 'opencode/' first. Tokens are matched
+// case-insensitively with contains (not startsWith): harnesses ship
+// compound UAs and the compat UA itself contains 'codeaf-compat'.
+export const HARNESS_RULES: HarnessRule[] = [
+  { token: 'opencode/', id: 'opencode', label: 'OpenCode', blurb: 'OpenCode client' },
+  { token: 'codeaf', id: 'codeaf', label: 'CodeAF', blurb: 'CodeAF client' },
+  { token: 'openclaude', id: 'openclaude', label: 'OpenClaude', blurb: 'OpenClaude client' },
+  { token: 'open-claude', id: 'openclaude', label: 'OpenClaude', blurb: 'OpenClaude client' },
+]
+
+export function classifyHarness(userAgent: string | undefined): HarnessStamp {
+  const ua = (userAgent || '').toLowerCase()
+  for (const rule of HARNESS_RULES) {
+    if (ua.includes(rule.token)) return rule.id
+  }
+  return 'unknown'
+}
+
+const MAX_UA_LOG_LENGTH = 120
 
 const FREE_MODEL_SUFFIX = '-free'
 const USER_AGENT_PREFIX = 'opencode/'
@@ -79,13 +106,15 @@ export interface CompatInput {
   headers: Record<string, string | string[] | undefined>
   body: Buffer
   model: string | null
-  getShimSessionId: () => string | undefined
-  setShimSessionId: (sid: string) => void
+  getShimSessionId: (client: string) => string | undefined
+  setShimSessionId: (client: string, sid: string) => void
 }
 
 export interface CompatResult {
   body: Buffer
   harness: HarnessStamp
+  compatApplied: boolean
+  clientUa: string | null
 }
 
 function getHeader(headers: CompatInput['headers'], name: string): string | undefined {
@@ -95,15 +124,16 @@ function getHeader(headers: CompatInput['headers'], name: string): string | unde
 }
 
 export function applyCodeafCompat(input: CompatInput): CompatResult {
-  const userAgent = getHeader(input.headers, 'user-agent')
-  const userAgentOk = !!userAgent && userAgent.startsWith(USER_AGENT_PREFIX)
+  const rawUserAgent = getHeader(input.headers, 'user-agent')
+  const client = classifyHarness(rawUserAgent)
+  const clientUa = rawUserAgent ? rawUserAgent.slice(0, MAX_UA_LOG_LENGTH) : null
+  const userAgentOk = client === 'opencode'
   const sessionIdOk = isWellFormedSessionId(getHeader(input.headers, 'x-session-id'))
-  const clientHarness: HarnessStamp = userAgentOk ? 'opencode' : 'unknown'
   // Phantom tool stubs are only ever appended to chat/completions payloads
   // (the only shape probed against the gate); other paths get header fills.
   const toolsEligible = input.targetPath.includes('/chat/completions')
   if (!input.enabled || !input.targetPath.startsWith('/zen/') || !input.model?.endsWith(FREE_MODEL_SUFFIX)) {
-    return { body: input.body, harness: clientHarness }
+    return { body: input.body, harness: client, compatApplied: false, clientUa }
   }
   let filled = false
   if (!userAgentOk) {
@@ -111,10 +141,10 @@ export function applyCodeafCompat(input: CompatInput): CompatResult {
     filled = true
   }
   if (!sessionIdOk) {
-    let shimSid = input.getShimSessionId()
+    let shimSid = input.getShimSessionId(client)
     if (!isWellFormedSessionId(shimSid)) {
       shimSid = mintSessionId()
-      input.setShimSessionId(shimSid)
+      input.setShimSessionId(client, shimSid)
     }
     input.headers['x-session-id'] = shimSid
     filled = true
@@ -137,5 +167,5 @@ export function applyCodeafCompat(input: CompatInput): CompatResult {
   } catch {
     // Unparseable body: header fills above still stand on their own.
   }
-  return { body, harness: filled ? 'codeaf' : clientHarness }
+  return { body, harness: client, compatApplied: filled, clientUa }
 }
