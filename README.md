@@ -79,12 +79,12 @@ Click any screenshot to view full resolution.
 
 - **Node.js** >= 22 (required by transitive dependencies)
 - **npm** or **bun** or **pnpm**
-- **OpenCode CLI** installed and configured with a Go subscription (Zen is optional but recommended)
+- **OpenCode CLI** >= 1.18.29 (for OpenCode V1) or OpenCode V2 (required for dual-entrypoint plugin support), configured with a Go subscription (Zen is optional but recommended)
 
 ## Installation
 
 ```bash
-git clone https://github.com/Rishabh-Bajpai/opencode-go-multi-auth.git
+git clone https://github.com/MotionDevLab/opencode-go-multi-auth.git
 cd opencode-go-multi-auth
 npm install
 npm run build
@@ -95,6 +95,44 @@ EOF
 ```
 
 The cloned repo must stay — the plugin loader points to its `dist/` directory.
+
+## Updating an existing installation
+
+If you installed the router from the default branch, update it from the repository root:
+
+```bash
+cd /path/to/opencode-go-multi-auth
+git status
+git fetch origin
+git switch main
+git pull --ff-only origin main
+npm ci
+npm run typecheck
+npm run build
+```
+
+Review any local changes reported by `git status` before switching branches. Do not discard them with a forced reset.
+
+Restart the router using the mode you use. For plugin mode or a manually started router, run:
+
+```bash
+./restart-router.sh
+```
+
+For the Linux systemd user service, run:
+
+```bash
+systemctl --user restart opencode-go-router.service
+```
+
+Use only one restart method. Verify the updated router after restarting:
+
+```bash
+curl -fsS http://127.0.0.1:18904/healthz
+curl -fsS http://127.0.0.1:18905/v1/models
+```
+
+The plugin loader and runtime state can remain in place. Encrypted keys and usage data are stored under `~/.opencode/`, not in the repository.
 
 ### OpenCode config
 
