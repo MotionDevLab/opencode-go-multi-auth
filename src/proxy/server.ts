@@ -511,13 +511,17 @@ export class ProxyServer {
             this.keyManager.markExhausted(key.id, throttleCooldownMs)
             this.circuitBreaker.recordFailure(key.id)
             this.keyManager.markError(key.id)
-            this.keyManager.recordRequest(key.id, {
-              statusCode: upstreamRes.status,
-              durationMs: duration,
-              model: prepared.model,
-              sessionId: upstreamSessionId ?? sessionKey ?? null,
-              successful: false,
-            })
+            if (attempt < maxAttempts - 1) {
+              // Counted here; on the last attempt the tail recordRequest
+              // below counts the verbatim 403 once (no double-count).
+              this.keyManager.recordRequest(key.id, {
+                statusCode: upstreamRes.status,
+                durationMs: duration,
+                model: prepared.model,
+                sessionId: upstreamSessionId ?? sessionKey ?? null,
+                successful: false,
+              })
+            }
             attemptedKeyIds.add(key.id)
             this.logStream.emit(
               this.logger,
