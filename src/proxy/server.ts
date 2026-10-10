@@ -558,13 +558,17 @@ export class ProxyServer {
           if (!repeatedServerError) {
             this.keyManager.markError(key.id)
           }
-          this.keyManager.recordRequest(key.id, {
-            statusCode: upstreamRes.status,
-            durationMs: duration,
-            model: prepared.model,
-            sessionId: upstreamSessionId ?? sessionKey ?? null,
-            successful: false,
-          })
+          if (attempt < maxAttempts - 1) {
+            // Counted here; on the last attempt the tail recordRequest
+            // below counts the verbatim 5xx once (no double-count).
+            this.keyManager.recordRequest(key.id, {
+              statusCode: upstreamRes.status,
+              durationMs: duration,
+              model: prepared.model,
+              sessionId: upstreamSessionId ?? sessionKey ?? null,
+              successful: false,
+            })
+          }
           attemptedKeyIds.add(key.id)
 
           if (circuitState === CircuitState.OPEN) {
