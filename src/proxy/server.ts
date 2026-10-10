@@ -18,7 +18,7 @@ import {
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
 import { applyCodeafCompat, type HarnessStamp } from './codeaf-compat.js'
 import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator, type TranslatorStats } from './zen-responses.js'
-import { isLocalNetworkOutage, isQuota429, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
+import { isLocalNetworkOutage, isQuota429, isThrottle403, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
 import { estimateCost } from './rate-card.js'
 import { SessionAffinityStore } from './session-affinity.js'
@@ -500,6 +500,50 @@ export class ProxyServer {
             continue
           }
         }
+
+        if (upstreamRes.status === 403) {
+          const throttleBody = await responseTextPromise
+          if (isThrottle403(upstreamRes.status, throttleBody)) {
+            const throttleCooldownMs = resolveCooldownMs(Object.fromEntries(upstreamRes.headers), throttleBody, Date.now(), 60_000)
+            // NOTE: no QuotaErrorSignal — markExhausted with a signal increments
+            // quotaErrorCount (key-manager.ts:177-186) and would pollute quota
+            // dashboards + notifier.keyExhausted. Throttle is not quota.
+            this.keyManager.markExhausted(key.id, throttleCooldownMs)
+            this.circuitBreaker.recordFailure(key.id)
+            this.keyManager.markError(key.id)
+            this.keyManager.recordRequest(key.id, {
+              statusCode: upstreamRes.status,
+              durationMs: duration,
+              model: prepared.model,
+              sessionId: upstreamSessionId ?? sessionKey ?? null,
+              successful: false,
+            })
+            attemptedKeyIds.add(key.id)
+            this.logStream.emit(
+              this.logger,
+              'warn',
+              `Key "${key.alias}" throttled (HTTP 403), cooldown ${throttleCooldownMs}ms, failing over`,
+              {
+                method: req.method,
+                harness, compatApplied, clientUa,
+                path: targetPath,
+                statusCode: upstreamRes.status,
+                keyAlias: key.alias,
+                keyId: key.id,
+                duration,
+                model: prepared.model,
+                strategy,
+                routeReason: reason,
+                selectedBySession,
+                sessionId: upstreamSessionId ?? sessionKey ?? null,
+                cooldownMs: throttleCooldownMs,
+                attempt: attempt + 1,
+                upstream: isZenRequest ? 'zen' : 'go',
+              },
+            )
+            if (attempt < maxAttempts - 1) continue
+          }
+        } // else: existing count-only path below, unchanged
 
         if (upstreamRes.status >= 500) {
           const repeatedServerError = upstreamServerErrorSeen
