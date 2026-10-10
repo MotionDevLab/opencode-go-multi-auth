@@ -37,6 +37,38 @@ export function isQuota429(statusCode: number, headers: Record<string, string>, 
   }
 }
 
+// NOTE: mirrored by isTransientThrottleMessage in openclaude
+// src/services/api/openaiErrorClassification.ts — keep the two in sync.
+export function isThrottle403(statusCode: number, body: string): boolean {
+  if (statusCode !== 403) return false
+  const lower = body.toLowerCase()
+  if (
+    lower.includes('quota') ||
+    lower.includes('exhausted') ||
+    lower.includes('usage limit') ||
+    lower.includes('usage_not_included') ||
+    lower.includes('freeusagelimit') ||
+    lower.includes('credit balance') ||
+    lower.includes('billing limit') ||
+    lower.includes('insufficient_quota') ||
+    lower.includes('payment required') ||
+    lower.includes('allotment') ||
+    lower.includes('limit: 0')
+  )
+    return false // billing stays terminal
+  if (
+    /unauthorized|invalid.{0,10}(key|token)|api key|forbidden|access denied|revoked|expired|permission|not allowed|org_|insufficient_quota|auth/.test(
+      lower,
+    )
+  )
+    return false
+  const trimmed = body.trim()
+  if (trimmed === '') return true // the Zen volume-gating shape
+  return /rate.?limit|too many requests|try again|slow down|throttl|overloaded|capacity|busy/.test(
+    lower,
+  )
+}
+
 export function parseRetryAfterHeaderMs(headers: Record<string, string>, now: number): number | null {
   const retryAfterMs = headers['retry-after-ms']
   if (retryAfterMs) {
