@@ -1779,7 +1779,7 @@ function renderLogRowHTML(entry, idx) {
       ${m.cost != null
         ? `<span class="cell cost ${m.costEstimated ? 'is-estimated' : ''}" title="${escapeHtml(m.costEstimated ? 'Estimated from published rate card — may not reflect the actual cost.' : 'Actual cost returned by the upstream provider.')}">${m.costEstimated ? '~' : ''}${escapeHtml(fmtCurrency(m.cost))}</span>`
         : '<span class="cell cost" title="Cost not reported by the upstream and no rate card entry for this model.">—</span>'}
-      ${expanded ? `<div class="log-detail">${escapeHtml(JSON.stringify(entry, null, 2))}</div>` : ''}
+      ${expanded ? `<div class="log-detail"><button class="btn btn-sm log-copy-btn" title="Copy this entry as JSON">Copy JSON</button><div>${escapeHtml(JSON.stringify(entry, null, 2))}</div></div>` : ''}
     </div>
   `;
 }
@@ -1847,6 +1847,27 @@ function scrollLogToTop() {
   body.scrollTop = 0;
 }
 
+async function copyLogEntryText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('Copied', 'success');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      toast('Copied', 'success');
+    } catch {
+      toast('Copy failed', 'error');
+    }
+    ta.remove();
+  }
+}
+
 function initLogsToolbar() {
   $('#logs-pause').addEventListener('click', () => {
     state.paused = !state.paused;
@@ -1881,8 +1902,19 @@ function initLogsToolbar() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
   $('#log-body').addEventListener('click', (e) => {
+    const copyBtn = e.target.closest('.log-copy-btn');
+    if (copyBtn) {
+      e.stopPropagation();
+      const btnRow = copyBtn.closest('.log-row');
+      if (!btnRow) return;
+      const btnEntry = getFilteredLogs()[parseInt(btnRow.dataset.logIdx, 10)];
+      if (!btnEntry) return;
+      copyLogEntryText(JSON.stringify(btnEntry));
+      return;
+    }
     const row = e.target.closest('.log-row');
     if (!row) return;
+    if (window.getSelection().toString() !== '' || e.target.closest('.log-detail, button, a')) return;
     const id = row.dataset.logId;
     state.expandedLogId = state.expandedLogId === id ? null : id;
     ensureLogRender();
