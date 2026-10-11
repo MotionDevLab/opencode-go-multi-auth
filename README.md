@@ -68,6 +68,7 @@ Click any screenshot to view full resolution.
 - **Per-Key Analytics** — Request count, success/error rate, average latency, token breakdown, last model used, last session ID, observed cost, and quota-error tally.
 - **Stream-Aware Usage Tracking** — Parses token usage from both full JSON and SSE streaming completions. Injects `stream_options.include_usage` for OpenAI-compatible streams.
 - **Circuit Breaker** — Temporarily removes unhealthy keys after 3 consecutive 5xx errors, auto-recovers after 5 minutes.
+- **Free-tier policy-403 retries** — A 403 carrying the exact free-tier policy sentence is transparently retried on the same key first, then spilled once to the next healthy key — never exiled, never counted against the breaker. Tunable live from the dashboard Failover section.
 - **Cache-Preserving Header Passthrough** — Forwards `X-Session-Id`, `prompt_cache_key` / `prompt-cache-key`, `cache_control` / `cache-control`, plus both bearer and `x-api-key` auth for broader model compatibility.
 - **Local Web UI Control Room** — Strategy explainer, key deck with inline editing, live usage ledger, quota-error panel, routing tape with per-request route reasons and session IDs, model catalog with visibility controls, and a drift detection banner.
 - **Secure Key Storage** — AES-256-GCM encrypted at rest using PBKDF2-derived key from machine identity.
@@ -275,15 +276,27 @@ Session stickiness is applied before any strategy. If a warm session key is dete
 
 Note: the legacy `priority_spillover` and `highest_remaining_quota` strategies were removed when the router stopped estimating quota. Stored values for those strategies are mapped to `priority_failover` for backward compatibility.
 
-## Sharing the pool between harnesses (OpenCode + CodeAF)
+## Sharing the pool between harnesses (OpenCode + CodeAF + OpenClaude)
 
-Both harnesses share one key pool, one strategy, and one session-affinity store. The `harness` label (`codeaf` / `opencode` / `unknown`) is log metadata only — key selection never branches on it.
+All three harnesses share one key pool, one strategy, and one session-affinity store. The `harness` label (`codeaf` / `openclaude` / `opencode` / `unknown`) is log metadata only — key selection never branches on it. OpenClaude sends a `claude-cli/…` user agent with no openclaude token, so the router maps `claude-cli` → `openclaude`; empty user agents stay `unknown`.
 
 1. **Stickiness first.** `x-session-id` → `x-opencode-session` → cache keys. A session with a warm key (< 20 min) reuses it. CodeAF sends one shared shim session id, so all CodeAF turns pin to one warm key; OpenCode sends one session id per conversation and pins independently. Under `priority_failover` both normally converge on the same highest-priority active key — two harnesses on one key is the expected state, not an accident.
 2. **Strategy second.** On a stickiness miss the global strategy picks. Both harnesses obey the same rule.
 3. **Failover is account-wide.** A quota 429 exiles the key for every harness (cooldown from the upstream, `COOLDOWN_MS` fallback); the next attempt from either harness walks to the next key, with `encrypted_content` stripped so conversations continue. Circuit-breaker errors are likewise per-key, not per-harness.
 
 There is no isolation: CodeAF burn consumes the same account quota OpenCode draws from, and a cooldown tripped by either harness degrades both. To protect interactive use during long CodeAF batch jobs, spread load via Strategy + key priorities (e.g. round-robin, or weighted with a reserve key) — a dashboard change, no restart needed.
+
+## Free-tier policy-403 retries
+
+A 403 carrying the exact free-tier policy sentence (`OpenCode's free tier can only be used from within OpenCode`) is a transient upstream flap, not a key failure — so the proxy transparently retries the same request instead of exiling the key:
+
+1. **Same key first** (up to 3 attempts, ~1s/5s/15s backoffs honoring `Retry-After`), preserving the warm session cache.
+2. **One spill** to the next healthy key, with `encrypted_content` stripped so the conversation continues.
+3. **Verbatim fallback** — the original 403 is returned unmodified only when every attempt fails.
+
+Nothing punitive ever runs on this path: no cooldown, no breaker feed, no notifications. Dashboards keep counting every attempt, and each policy-403 warn line carries a redacted body preview plus a `policyRetry` summary (`attempts`, `backoffs`, `masked`, `spilled`) so wording drift stays visible. Anything unrecognized — including empty-body 403s, which keep the throttle-exile path — behaves exactly as before.
+
+All six knobs live on the dashboard Failover section and apply hot, no restart: master switch, same-key attempts (0–5), comma-separated backoffs (each 0–30000ms, totals trimmed to fit the cap), max added latency (10–90s), spill toggle, and Retry-After toggle. A depth-advisor banner aggregates recent masked/unmasked outcomes and suggests a retry depth; it only ever advises — Apply goes through the same validated save, and it never auto-tunes.
 
 ## Routing Tape (Log Viewer)
 
@@ -305,7 +318,7 @@ The dashboard is organized into seven pages:
 2. **Accounts** — Add, enable/drain, reorder (drag), and set priority/weight for each account. Each card shows its circuit-breaker state, quota-error tally, last quota error (status code, message, retry time), token breakdown, latency, error rate, last model, and a "Test" button that fires a live request through the proxy. Persistent to disk.
 3. **Strategy Console** — Select an active strategy and see its description, best-for recommendation, cache friendliness, and behavior.
 4. **Tokens** — Per-model and per-key time series, category share, observed cost, and 30-day rolling usage.
-5. **Logs** — Virtualized table of every routed request, with the latest entry at the top. Search across path / model / key / route reason, filter by level / "Quota only" / provider (Go / Zen / All), pause auto-scroll, paginate for long histories, right-click to copy fields, click a row to see the full metadata.
+5. **Logs** — Virtualized table of every routed request, with the latest entry at the top. Search across path / model / key / route reason, filter by level / "Quota only" / provider (Go / Zen / All), pause auto-scroll, paginate for long histories, right-click to copy fields, click a row to see the full metadata. Expanded rows carry a Copy JSON button for byte-identical copies, and drag-selecting inside never collapses the row.
 6. **Models** — Browse the combined model catalog from both upstreams. Select which models show in the token charts. A drift banner lists free Zen models the upstream offers that are not in your `opencode.json` and provides a "Copy snippet" button to paste them in.
 7. **Settings** — Active config (ports, strategy, total tokens observed, total observed cost, quota errors caught), the notification URL (ntfy.sh), the notification log, and the provider config snippet to copy into `~/.config/opencode/opencode.json`.
 

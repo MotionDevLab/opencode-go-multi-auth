@@ -320,3 +320,33 @@ is the upstream itself.
   comment-free.
 - The dashboard `public/app.js` is hand-written vanilla JS. No build
   step, no bundler, no transpilation.
+
+## Free-tier policy-403 retries (zero-exile path)
+
+- A 403 carrying the exact sentence `OpenCode's free tier can only be used
+  from within OpenCode` (case/whitespace/apostrophe-normalized,
+  `isFreeTierPolicy403` in `src/proxy/quota-detector.ts`) is retried
+  same-key-first, then spilled once — never `markExhausted`, never
+  `recordFailure`, never notifier. `recordRequest(successful: false)` only.
+- Empty-body 403s are NOT policy-403s: `isThrottle403` is true-on-empty
+  (volume gating) and keeps the throttle-exile path. The detector runs
+  before it; anything declined keeps today's paths byte-identical.
+- One policy sequence per request max (`policyRetrySpent`); tuning is
+  snapshotted once at retry entry; fresh `AbortController` per attempt;
+  drain `upstreamRes.body` before refetching.
+- Tuning keys (`RouterConfig`/`FailoverTuning`, hot-reloaded, additive):
+  `policy403Enabled` (true), `policy403SameKeyAttempts` 0–5 (3),
+  `policy403BackoffsMs` (length == attempts, each 0–30000, default
+  `[1000,5000,15000]`), `policy403SpillEnabled` (true),
+  `policy403HonorRetryAfter` (true, header-read only via
+  `parseRetryAfterHeaderMs` — never `resolveCooldownMs`),
+  `policy403MaxAddedLatencyMs` 10000–90000 (30000).
+- Log fields for debugging: `bodyPreview` (≤120 chars,
+  redact-then-truncate), `policyRetry:
+  {attempts, backoffs, masked, spilled}`, `policySequence:
+  attempt|masked|unmasked` (exactly one terminal summary per sequenced
+  request; `spilled` is explicit, with count-inference fallback for
+  pre-flag summaries).
+- Harness: a `claude-cli` UA maps to `openclaude` (after the `opencode/`
+  rule, first-match-wins); empty UAs stay `unknown` but still get compat
+  fills on zen + `-free` when the toggle is on.
