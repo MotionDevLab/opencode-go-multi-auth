@@ -290,6 +290,9 @@ export class ProxyServer {
     let policyPreviewUsed: string | null = null
     let policyBackoffsUsed: number[] = []
     let policyRecorded = 0
+    // Set at spill time so the terminal summary (and banner) can attribute
+    // spill outcomes exactly instead of inferring from attempt counts.
+    let policySpilled = false
     // A 5xx that repeats on a second key is a property of the request or the
     // upstream, not of the key: the same body failed the same way with
     // different credentials. Only the first 5xx of a request counts against a
@@ -582,7 +585,7 @@ export class ProxyServer {
                 selectedBySession,
                 sessionId: upstreamSessionId ?? sessionKey ?? null,
                 bodyPreview: policyPreview,
-                policyRetry: { attempts: attempt, backoffs: policyBackoffs, masked },
+                policyRetry: { attempts: attempt, backoffs: policyBackoffs, masked, spilled: policySpilled },
                 policySequence: phase,
                 upstream: isZenRequest ? 'zen' : 'go',
               })
@@ -679,7 +682,7 @@ export class ProxyServer {
                     strategy,
                     routeReason: reason,
                     bodyPreview: policyPreview,
-                    policyRetry: { attempts: pi + 2, backoffs: policyBackoffs, masked: false },
+                    policyRetry: { attempts: pi + 2, backoffs: policyBackoffs, masked: false, spilled: policySpilled },
                     policySequence: 'attempt',
                     upstream: isZenRequest ? 'zen' : 'go',
                   })
@@ -709,6 +712,7 @@ export class ProxyServer {
                 if (spillTargets.length > 0) {
                   flushPolicyCounts(false)
                   attemptedKeyIds.add(key.id)
+                  policySpilled = true
                   emitPolicyLine('warn', `Policy-403 persists on key "${key.alias}" after ${policyCounted.length} attempts, spilling to next healthy key`, policyCounted.length, false, 'attempt')
                   continue attemptLoop
                 }
@@ -988,7 +992,7 @@ export class ProxyServer {
               selectedBySession,
               sessionId: upstreamSessionId ?? sessionKey ?? null,
               bodyPreview: policyPreviewUsed,
-              policyRetry: { attempts: terminalAttempts, backoffs: policyBackoffsUsed, masked: terminalMasked },
+              policyRetry: { attempts: terminalAttempts, backoffs: policyBackoffsUsed, masked: terminalMasked, spilled: policySpilled },
               policySequence: terminalMasked ? 'masked' : 'unmasked',
               upstream: isZenRequest ? 'zen' : 'go',
             })

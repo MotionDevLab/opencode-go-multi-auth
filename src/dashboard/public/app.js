@@ -1606,6 +1606,7 @@ function policySequences() {
       masked: m.policySequence === 'masked',
       attempts: typeof pr.attempts === 'number' ? pr.attempts : 0,
       backoffs: Array.isArray(pr.backoffs) ? pr.backoffs : [],
+      spilled: typeof pr.spilled === 'boolean' ? pr.spilled : null,
     });
   }
   return seqs.slice(-50);
@@ -1628,8 +1629,8 @@ function renderPolicyBanner() {
     if (!sums.length) return 0;
     return sums[Math.min(sums.length - 1, Math.floor(sums.length * 0.95))];
   };
-  // Spilled = attempts beyond the sequence's own backoff schedule.
-  const spilled = seqs.filter((s) => s.attempts > s.backoffs.length);
+  // Explicit spill flag preferred; heuristic fallback for pre-flag summaries.
+  const spilled = seqs.filter((s) => s.spilled === true || (s.spilled === null && s.attempts > s.backoffs.length));
   const spillMask = spilled.length ? spilled.filter((s) => s.masked).length / spilled.length : null;
   let depth = 0;
   for (const d of [1, 2, 3]) { if (rateAt(d) >= 0.9) { depth = d; break; } }
