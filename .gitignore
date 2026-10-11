@@ -8,3 +8,4 @@ repos/
 .playwright-mcp/*.yml
 .opencode/
 opencode-go-multi-auth.code-workspace
+.omo/
