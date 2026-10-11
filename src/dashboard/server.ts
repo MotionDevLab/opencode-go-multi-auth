@@ -256,7 +256,20 @@ export class DashboardServer {
     }))
 
     this.app.put('/api/failover-tuning', wrap(async (req, res) => {
-      const parsed = validateFailoverTuning(req.body)
+      // Tolerant-fill for the additive policy403 keys: old cached dashboard
+      // tabs send payloads without them — fill from current effective tuning
+      // so upgrade-path saves don't 400. Existing keys stay strict.
+      const current = tuningFromConfig(this.configStore.getAll())
+      const body = {
+        policy403Enabled: current.policy403Enabled,
+        policy403SameKeyAttempts: current.policy403SameKeyAttempts,
+        policy403BackoffsMs: current.policy403BackoffsMs,
+        policy403SpillEnabled: current.policy403SpillEnabled,
+        policy403HonorRetryAfter: current.policy403HonorRetryAfter,
+        policy403MaxAddedLatencyMs: current.policy403MaxAddedLatencyMs,
+        ...(req.body ?? {}),
+      }
+      const parsed = validateFailoverTuning(body)
       if (!parsed.ok) {
         res.status(400).json({ error: parsed.error })
         return
@@ -272,6 +285,12 @@ export class DashboardServer {
       this.configStore.set('windowFailures', tuning.windowFailures)
       this.configStore.set('windowSeconds', tuning.windowSeconds)
       this.configStore.set('sseIdleTimeoutMs', tuning.sseIdleTimeoutMs)
+      this.configStore.set('policy403Enabled', tuning.policy403Enabled)
+      this.configStore.set('policy403SameKeyAttempts', tuning.policy403SameKeyAttempts)
+      this.configStore.set('policy403BackoffsMs', tuning.policy403BackoffsMs)
+      this.configStore.set('policy403SpillEnabled', tuning.policy403SpillEnabled)
+      this.configStore.set('policy403HonorRetryAfter', tuning.policy403HonorRetryAfter)
+      this.configStore.set('policy403MaxAddedLatencyMs', tuning.policy403MaxAddedLatencyMs)
       this.circuitBreaker.setThreshold(tuning.circuitBreakerThreshold)
       this.circuitBreaker.setRecoveryMs(tuning.circuitBreakerRecoveryMs)
       this.circuitBreaker.setSelfCancelMs(tuning.breakerSelfCancelMs)

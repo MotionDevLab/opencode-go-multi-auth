@@ -37,6 +37,38 @@ export function isQuota429(statusCode: number, headers: Record<string, string>, 
   }
 }
 
+// Free-tier policy rejection (NOT throttle, NOT quota — key swap cannot fix
+// it): status 403 + the canonical sentence captured 2026-10-11 via CLI
+// --debug (`OpenCode's free tier can only be used from within OpenCode`).
+// Narrow by construction: normalized contains-match only (lowercase,
+// whitespace-collapsed, curly-apostrophe-folded). Anything unrecognized —
+// wording drift, empty body, throttle/quota/auth phrasing, wrong status —
+// returns false so the existing throttle/count-only paths handle it exactly
+// as today (fails closed). Empty bodies in particular must NOT match here:
+// they belong to the throttle-exile path (isThrottle403 true-on-empty).
+const FREE_TIER_POLICY_SENTENCE = "opencode's free tier can only be used from within opencode"
+
+function normalizePolicyBody(body: string): string {
+  return body.replace(/['\u2018\u2019]/g, "'").replace(/\s+/g, ' ').toLowerCase()
+}
+
+export function isFreeTierPolicy403(statusCode: number, body: string): boolean {
+  if (statusCode !== 403) return false
+  return normalizePolicyBody(body).includes(FREE_TIER_POLICY_SENTENCE)
+}
+
+// Redact-then-truncate body preview for warn log lines: collapse to one
+// line, mask secret-shaped tokens FIRST, then cut to maxChars so a secret
+// can never straddle the cut. Upstream error bodies should not carry key
+// material, but the preview lands in dashboard logs + log files — redact.
+const SECRET_PREVIEW_PATTERNS = [/sk-[A-Za-z0-9\-_]{8,}/g, /bearer\s+[A-Za-z0-9\-_.~+/=]{8,}/gi]
+
+export function redactBodyPreview(body: string, maxChars = 120): string {
+  const singleLine = body.replace(/\s+/g, ' ').trim()
+  const redacted = SECRET_PREVIEW_PATTERNS.reduce((acc, re) => acc.replace(re, '[redacted]'), singleLine)
+  return redacted.length > maxChars ? redacted.slice(0, maxChars) : redacted
+}
+
 // NOTE: mirrored by isTransientThrottleMessage in openclaude
 // src/services/api/openaiErrorClassification.ts — keep the two in sync.
 export function isThrottle403(statusCode: number, body: string): boolean {

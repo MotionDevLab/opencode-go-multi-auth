@@ -18,7 +18,7 @@ import {
 import { buildUpstreamHeaders, extractCacheHeaders } from './header-passthrough.js'
 import { applyCodeafCompat, type HarnessStamp } from './codeaf-compat.js'
 import { isChatCompletionsPath, toResponsesPath, toResponsesRequestBody, toChatCompletion, SseTranslator, type TranslatorStats } from './zen-responses.js'
-import { isLocalNetworkOutage, isQuota429, isThrottle403, parseRetryAfterHeaderMs, resolveCooldownMs } from './quota-detector.js'
+import { isFreeTierPolicy403, isLocalNetworkOutage, isQuota429, isThrottle403, parseRetryAfterHeaderMs, redactBodyPreview, resolveCooldownMs } from './quota-detector.js'
 import { parseUsageData } from './response-parser.js'
 import { estimateCost } from './rate-card.js'
 import { SessionAffinityStore } from './session-affinity.js'
@@ -60,6 +60,38 @@ interface StreamPipeStats {
 // Node setTimeout delays overflow past 2^31-1ms to ~1ms. The dashboard caps
 // this value, but the env fallback is unbounded, so clamp before arming.
 const MAX_TIMEOUT_DELAY_MS = 2_147_483_647
+
+// Free-tier policy-403 (upstream flap) backoff schedule: first N entries of
+// the configured backoffs, tail-trimmed so the running total never exceeds
+// the max-added-latency cap (later backoffs absorb the cut first). Pure —
+// unit-verifiable without network.
+export function resolvePolicyBackoffs(sameKeyAttempts: number, backoffsMs: number[], maxAddedLatencyMs: number): number[] {
+  const schedule: number[] = []
+  let used = 0
+  for (let i = 0; i < sameKeyAttempts; i++) {
+    const want = backoffsMs[i] ?? 0
+    const give = Math.max(0, Math.min(want, maxAddedLatencyMs - used))
+    schedule.push(give)
+    used += give
+  }
+  return schedule
+}
+
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false)
+  if (ms <= 0) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve(true)
+    }, Math.min(ms, MAX_TIMEOUT_DELAY_MS))
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
 
 function buildUpstreamUrl(upstreamUrl: string, requestUrl?: string): string {
   const upstream = new URL(upstreamUrl)
@@ -250,6 +282,14 @@ export class ProxyServer {
       ?? (getHeader(headers, 'prompt-cache-key') ? createProxySessionId(getHeader(headers, 'prompt-cache-key')!) : undefined)
 
     const attemptedKeyIds = new Set<string>()
+    // Policy-403 (free-tier flap) budget: the same-key + one-spill sequence
+    // runs at most once per request (see the 403 branch below).
+    let policyRetrySpent = false
+    // Policy-403 terminal-summary state: the tail emits exactly one countable
+    // masked/unmasked outcome per request that ran a policy sequence.
+    let policyPreviewUsed: string | null = null
+    let policyBackoffsUsed: number[] = []
+    let policyRecorded = 0
     // A 5xx that repeats on a second key is a property of the request or the
     // upstream, not of the key: the same body failed the same way with
     // different credentials. Only the first 5xx of a request counts against a
@@ -282,7 +322,7 @@ export class ProxyServer {
       })
     }
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    attemptLoop: for (let attempt = 0; attempt < maxAttempts; attempt++) {
       if (upstreamAbortController.signal.aborted) {
         return
       }
@@ -502,7 +542,192 @@ export class ProxyServer {
         }
 
         if (upstreamRes.status === 403) {
-          const throttleBody = await responseTextPromise
+          let throttleBody = await responseTextPromise
+          // (policy-403 branch below may replace the response via same-key
+          // retries; latestBody tracks the CURRENT response body so the
+          // throttle check underneath always evaluates what is actually
+          // being returned, never a stale first attempt.)
+          let latestBody = throttleBody
+          // Free-tier policy flap: transient upstream rejection, NOT a key
+          // failure — retry the SAME request (same key first, then one spill)
+          // with zero exile machinery: no markExhausted, no recordFailure, no
+          // notifier. recordRequest(successful:false) only, flushed exactly
+          // once per attempt at the sequence end (see flushPolicyCounts), so
+          // the tail below never double-counts. Runs at most once per request
+          // (policyRetrySpent); a second policy-403 falls through to the tail
+          // verbatim. Detector is checked BEFORE isThrottle403; anything it
+          // declines (including empty bodies) keeps today's paths unchanged.
+          if (!policyRetrySpent && isFreeTierPolicy403(upstreamRes.status, throttleBody)) {
+            // Snapshot tuning once: a mid-retry dashboard save must not
+            // desync the backoff schedule.
+            const policyTuning = this.getTuning()
+            const policyPreview = redactBodyPreview(throttleBody)
+            const policyBackoffs = resolvePolicyBackoffs(
+              policyTuning.policy403SameKeyAttempts,
+              policyTuning.policy403BackoffsMs,
+              policyTuning.policy403MaxAddedLatencyMs,
+            )
+            const emitPolicyLine = (level: 'warn' | 'info', message: string, attempt: number, masked: boolean, phase: 'attempt' | 'masked' | 'unmasked') => {
+              this.logStream.emit(this.logger, level, message, {
+                method: req.method,
+                harness, compatApplied, clientUa,
+                path: targetPath,
+                statusCode: upstreamRes.status,
+                keyAlias: key.alias,
+                keyId: key.id,
+                duration,
+                model: prepared.model,
+                strategy,
+                routeReason: reason,
+                selectedBySession,
+                sessionId: upstreamSessionId ?? sessionKey ?? null,
+                bodyPreview: policyPreview,
+                policyRetry: { attempts: attempt, backoffs: policyBackoffs, masked },
+                policySequence: phase,
+                upstream: isZenRequest ? 'zen' : 'go',
+              })
+            }
+            // Deferred counting: every policy-403 response is remembered, then
+            // flushed exactly once at the sequence end — all of them when the
+            // sequence continues elsewhere (spill/mask/failover skips the
+            // tail), all-but-last when falling through (the tail counts the
+            // final verbatim 403 once).
+            const policyCounted: Array<{ statusCode: number; durationMs: number }> = []
+            const flushPolicyCounts = (exceptLast: boolean) => {
+              const entries = exceptLast ? policyCounted.slice(0, -1) : policyCounted
+              policyRecorded += entries.length
+              for (const entry of entries) {
+                this.keyManager.recordRequest(key.id, {
+                  statusCode: entry.statusCode,
+                  durationMs: entry.durationMs,
+                  model: prepared.model,
+                  sessionId: upstreamSessionId ?? sessionKey ?? null,
+                  successful: false,
+                })
+              }
+            }
+            if (!policyTuning.policy403Enabled) {
+              // Master switch off: today's behavior exactly — tail counts below.
+            } else {
+              policyRetrySpent = true
+              policyPreviewUsed = policyPreview
+              policyBackoffsUsed = policyBackoffs
+              policyCounted.push({ statusCode: upstreamRes.status, durationMs: duration })
+              // Zero-backoff schedules emit no attempt line here (nothing is
+              // retried yet); the spill line or the tail summary below covers
+              // observability with zero added latency.
+              if (policyBackoffs.length > 0) {
+                emitPolicyLine('warn', `Policy-403 flap on key "${key.alias}" (attempt 1, retrying same key)`, 1, false, 'attempt')
+              }
+              let backoffSpent = 0
+              for (let pi = 0; pi < policyBackoffs.length; pi++) {
+                let waitMs = policyBackoffs[pi]
+                if (policyTuning.policy403HonorRetryAfter) {
+                  const retryAfterMs = parseRetryAfterHeaderMs(Object.fromEntries(upstreamRes.headers), Date.now())
+                  if (retryAfterMs !== null) {
+                    waitMs = Math.min(Math.max(retryAfterMs, 0), Math.max(0, policyTuning.policy403MaxAddedLatencyMs - backoffSpent))
+                  }
+                }
+                if (!await sleepAbortable(waitMs, upstreamAbortController.signal)) break
+                backoffSpent += waitMs
+                upstreamRes.body?.cancel().catch(() => {})
+                // Fresh controller per attempt (never reuse the aborted
+                // signal), still wired to the client-close signal.
+                const retryController = new AbortController()
+                const forwardClientClose = () => {
+                  if (!retryController.signal.aborted) retryController.abort(upstreamAbortController.signal.reason)
+                }
+                if (upstreamAbortController.signal.aborted) break
+                upstreamAbortController.signal.addEventListener('abort', forwardClientClose, { once: true })
+                let retryHungTimer: ReturnType<typeof setTimeout> | undefined
+                if (this.config.upstreamHungTimeoutMs > 0) {
+                  retryHungTimer = setTimeout(() => {
+                    if (!retryController.signal.aborted) retryController.abort(new Error('upstream hung (no response within UPSTREAM_HUNG_TIMEOUT_MS)'))
+                  }, this.config.upstreamHungTimeoutMs)
+                }
+                const retryStart = Date.now()
+                let retryRes: Response
+                try {
+                  retryRes = await fetch(buildUpstreamUrl(upstreamUrl, req.url), {
+                    method: req.method ?? 'GET',
+                    headers: upstreamHeaders,
+                    body: req.method !== 'GET' && req.method !== 'HEAD' ? prepared.body : undefined,
+                    signal: retryController.signal,
+                  })
+                } catch (err) {
+                  if (retryHungTimer) clearTimeout(retryHungTimer)
+                  upstreamAbortController.signal.removeEventListener('abort', forwardClientClose)
+                  // Transport error mid-sequence: same handling as the outer
+                  // catch below (count, burn nothing, fail over to next key).
+                  lastError = err instanceof Error ? err.message : String(err)
+                  flushPolicyCounts(false)
+                  this.keyManager.recordRequest(key.id, {
+                    statusCode: 0,
+                    durationMs: Date.now() - retryStart,
+                    model: prepared.model,
+                    sessionId: upstreamSessionId ?? sessionKey ?? null,
+                    successful: false,
+                  })
+                  attemptedKeyIds.add(key.id)
+                  this.logStream.emit(this.logger, 'error', `Policy-403 retry transport error on key "${key.alias}": ${lastError}, failing over`, {
+                    method: req.method,
+                    harness, compatApplied, clientUa,
+                    path: targetPath,
+                    keyAlias: key.alias,
+                    keyId: key.id,
+                    model: prepared.model,
+                    strategy,
+                    routeReason: reason,
+                    bodyPreview: policyPreview,
+                    policyRetry: { attempts: pi + 2, backoffs: policyBackoffs, masked: false },
+                    policySequence: 'attempt',
+                    upstream: isZenRequest ? 'zen' : 'go',
+                  })
+                  continue attemptLoop
+                }
+                if (retryHungTimer) clearTimeout(retryHungTimer)
+                upstreamAbortController.signal.removeEventListener('abort', forwardClientClose)
+                upstreamRes = retryRes
+                duration = Date.now() - retryStart
+                responseTextPromise = upstreamRes.clone().text().catch(() => '')
+                const retryBody = await responseTextPromise
+                latestBody = retryBody
+                if (!isFreeTierPolicy403(upstreamRes.status, retryBody)) break
+                policyCounted.push({ statusCode: upstreamRes.status, durationMs: duration })
+                emitPolicyLine('warn', `Policy-403 flap on key "${key.alias}" (attempt ${pi + 2}, retrying same key)`, pi + 2, false, 'attempt')
+              }
+              if (upstreamAbortController.signal.aborted) return
+              if (upstreamRes.status < 400) {
+                // Masked: count the remembered 403s, rejoin the normal path —
+                // the success block sets affinity and the tail emits the
+                // single masked summary for this request.
+                flushPolicyCounts(false)
+              } else if (isFreeTierPolicy403(upstreamRes.status, await responseTextPromise)) {
+                const spillTargets = policyTuning.policy403SpillEnabled
+                  ? this.keyManager.getActiveKeys().filter((entry) => entry.id !== key.id && !attemptedKeyIds.has(entry.id))
+                  : []
+                if (spillTargets.length > 0) {
+                  flushPolicyCounts(false)
+                  attemptedKeyIds.add(key.id)
+                  emitPolicyLine('warn', `Policy-403 persists on key "${key.alias}" after ${policyCounted.length} attempts, spilling to next healthy key`, policyCounted.length, false, 'attempt')
+                  continue attemptLoop
+                }
+                // Verbatim fallback: the last retry's response is a genuine
+                // upstream 403 for this request — fall through (throttle check
+                // declines it by zero-overlap construction); the tail pipes it
+                // unmodified, counts it once, and emits the single unmasked
+                // summary for this request.
+                flushPolicyCounts(true)
+              } else {
+                // Non-policy outcome (e.g. genuine 5xx/throttle-403): count
+                // the remembered 403s and rejoin the normal flow below, which
+                // handles the new response (breaker on 5xx, exile on
+                // throttle-403 via the refreshed body).
+                flushPolicyCounts(false)
+              }
+              throttleBody = latestBody
+            }
+          }
           if (isThrottle403(upstreamRes.status, throttleBody)) {
             const throttleCooldownMs = resolveCooldownMs(Object.fromEntries(upstreamRes.headers), throttleBody, Date.now(), 60_000)
             // NOTE: no QuotaErrorSignal — markExhausted with a signal increments
@@ -736,6 +961,38 @@ export class ProxyServer {
           this.onAffinityChange?.()
         }
 
+        // Policy-403 terminal summary: exactly one countable masked/unmasked
+        // outcome per request that ran a policy sequence — the depth-tuning
+        // source for the dashboard banner. Never counts (the tail below counts
+        // once); warn when unmasked, info when masked. Covers same-key masks,
+        // verbatim fallbacks, AND post-spill terminals on the next key.
+        if (policyRetrySpent && policyPreviewUsed !== null) {
+          const terminalPolicy = isFreeTierPolicy403(upstreamRes.status, responseBody)
+          const terminalMasked = upstreamRes.status < 400
+          const terminalAttempts = policyRecorded + (terminalPolicy ? 1 : 0)
+          this.logStream.emit(this.logger, terminalMasked ? 'info' : 'warn',
+            terminalMasked
+              ? `Policy-403 flap masked (terminal ${upstreamRes.status} after ${terminalAttempts} policy-403s)`
+              : `Policy-403 persists, returning verbatim ${upstreamRes.status} after ${terminalAttempts} policy-403s`,
+            {
+              method: req.method,
+              harness, compatApplied, clientUa,
+              path: targetPath,
+              statusCode: upstreamRes.status,
+              keyAlias: key.alias,
+              keyId: key.id,
+              duration,
+              model: prepared.model,
+              strategy,
+              routeReason: reason,
+              selectedBySession,
+              sessionId: upstreamSessionId ?? sessionKey ?? null,
+              bodyPreview: policyPreviewUsed,
+              policyRetry: { attempts: terminalAttempts, backoffs: policyBackoffsUsed, masked: terminalMasked },
+              policySequence: terminalMasked ? 'masked' : 'unmasked',
+              upstream: isZenRequest ? 'zen' : 'go',
+            })
+        }
         const level = upstreamRes.status >= 500 ? 'error' : upstreamRes.status >= 400 ? 'warn' : 'info'
         this.logStream.emit(this.logger, level, `${req.method} ${targetPath} -> ${upstreamRes.status}`, {
           method: req.method,

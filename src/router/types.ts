@@ -95,6 +95,12 @@ export interface RouterConfig {
   sseIdleTimeoutMs: number
   keepAliveTimeoutMs: number
   headersTimeoutMs: number
+  policy403Enabled: boolean
+  policy403SameKeyAttempts: number
+  policy403BackoffsMs: number[]
+  policy403SpillEnabled: boolean
+  policy403HonorRetryAfter: boolean
+  policy403MaxAddedLatencyMs: number
 }
 
 export const ROUTING_STRATEGIES: RoutingStrategyInfo[] = [
@@ -174,6 +180,12 @@ export const DEFAULT_CONFIG: RouterConfig = {
   sseIdleTimeoutMs: 0,
   keepAliveTimeoutMs: 5 * 60 * 1000,
   headersTimeoutMs: 60 * 1000,
+  policy403Enabled: true,
+  policy403SameKeyAttempts: 3,
+  policy403BackoffsMs: [1000, 5000, 15000],
+  policy403SpillEnabled: true,
+  policy403HonorRetryAfter: true,
+  policy403MaxAddedLatencyMs: 30000,
 }
 
 export enum CircuitState {
@@ -193,6 +205,12 @@ export interface FailoverTuning {
   windowFailures: number
   windowSeconds: number
   sseIdleTimeoutMs: number
+  policy403Enabled: boolean
+  policy403SameKeyAttempts: number
+  policy403BackoffsMs: number[]
+  policy403SpillEnabled: boolean
+  policy403HonorRetryAfter: boolean
+  policy403MaxAddedLatencyMs: number
 }
 
 export const FAILOVER_TUNING_RANGES = {
@@ -202,7 +220,13 @@ export const FAILOVER_TUNING_RANGES = {
   retryAfterCapMs: { min: 60_000, max: 3_600_000 },
   windowFailures: { min: 3, max: 20 },
   windowSeconds: { min: 60, max: 600 },
+  policy403SameKeyAttempts: { min: 0, max: 5 },
+  policy403MaxAddedLatencyMs: { min: 10_000, max: 90_000 },
 } as const
+
+export const POLICY403_DEFAULT_BACKOFFS_MS = [1000, 5000, 15000]
+const POLICY403_BACKOFF_MIN_MS = 0
+const POLICY403_BACKOFF_MAX_MS = 30_000
 
 function checkIntRange(name: string, value: unknown, min: number, max: number): string | null {
   if (typeof value !== 'number' || !Number.isInteger(value)) return `${name} must be an integer`
@@ -234,8 +258,20 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
   if (sseIdle !== 0 && (sseIdle < 30_000 || sseIdle > 900_000)) {
     return { ok: false, error: 'sseIdleTimeoutMs must be 0 or between 30000 and 900000' }
   }
-  for (const name of ['burstFailoverEnabled', 'honorRetryAfter', 'codeafCompatEnabled']) {
+  for (const name of ['burstFailoverEnabled', 'honorRetryAfter', 'codeafCompatEnabled', 'policy403Enabled', 'policy403SpillEnabled', 'policy403HonorRetryAfter']) {
     if (typeof v[name] !== 'boolean') return { ok: false, error: `${name} must be a boolean` }
+  }
+  // policy403BackoffsMs: array shape does not fit the scalar RANGES loop —
+  // length must equal the validated attempts, each entry 0–30000ms.
+  const attempts = v.policy403SameKeyAttempts as number
+  const backoffs = v.policy403BackoffsMs
+  if (!Array.isArray(backoffs) || backoffs.length !== attempts) {
+    return { ok: false, error: `policy403BackoffsMs must be an array of length ${attempts}` }
+  }
+  for (const entry of backoffs) {
+    if (typeof entry !== 'number' || !Number.isInteger(entry) || entry < POLICY403_BACKOFF_MIN_MS || entry > POLICY403_BACKOFF_MAX_MS) {
+      return { ok: false, error: 'policy403BackoffsMs entries must be integers between 0 and 30000' }
+    }
   }
   return {
     ok: true,
@@ -250,11 +286,19 @@ export function validateFailoverTuning(input: unknown): { ok: true; value: Failo
       windowFailures: v.windowFailures as number,
       windowSeconds: v.windowSeconds as number,
       sseIdleTimeoutMs: sseIdle,
+      policy403Enabled: v.policy403Enabled as boolean,
+      policy403SameKeyAttempts: attempts,
+      policy403BackoffsMs: [...backoffs],
+      policy403SpillEnabled: v.policy403SpillEnabled as boolean,
+      policy403HonorRetryAfter: v.policy403HonorRetryAfter as boolean,
+      policy403MaxAddedLatencyMs: v.policy403MaxAddedLatencyMs as number,
     },
   }
 }
 
 export function tuningFromConfig(config: RouterConfig): FailoverTuning {
+  // ?? fallbacks: old stored configs (and hand-built objects) predate the
+  // policy403 keys — they resolve to behavior-identical defaults, never throw.
   return {
     circuitBreakerThreshold: config.circuitBreakerThreshold,
     circuitBreakerRecoveryMs: config.circuitBreakerRecoveryMs,
@@ -266,5 +310,11 @@ export function tuningFromConfig(config: RouterConfig): FailoverTuning {
     windowFailures: config.windowFailures,
     windowSeconds: config.windowSeconds,
     sseIdleTimeoutMs: config.sseIdleTimeoutMs,
+    policy403Enabled: config.policy403Enabled ?? DEFAULT_CONFIG.policy403Enabled,
+    policy403SameKeyAttempts: config.policy403SameKeyAttempts ?? DEFAULT_CONFIG.policy403SameKeyAttempts,
+    policy403BackoffsMs: config.policy403BackoffsMs ?? [...POLICY403_DEFAULT_BACKOFFS_MS],
+    policy403SpillEnabled: config.policy403SpillEnabled ?? DEFAULT_CONFIG.policy403SpillEnabled,
+    policy403HonorRetryAfter: config.policy403HonorRetryAfter ?? DEFAULT_CONFIG.policy403HonorRetryAfter,
+    policy403MaxAddedLatencyMs: config.policy403MaxAddedLatencyMs ?? DEFAULT_CONFIG.policy403MaxAddedLatencyMs,
   }
 }
