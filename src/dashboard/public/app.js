@@ -155,6 +155,7 @@ const state = {
   visibleModels: null,     // string[] or null (null = all)
   zenProviderName: 'multi-auth-zen', // opencode.json provider name for drift detection
   failoverTuning: null,   // last fetched GET /api/failover-tuning (null = not loaded yet)
+  policyBannerDismissed: false, // depth-advisor dismiss persists per session (in-memory only)
   zenDriftAnnounced: null, // last drift signature announced via toast (per session)
   zenDriftTimer: null,      // setTimeout handle for 12h re-check
 };
@@ -1347,7 +1348,7 @@ async function renderFailoverTuning() {
     host.innerHTML = '<div class="empty-state">Failover tuning unavailable.</div>';
     return;
   }
-  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-sse-enabled', '#ft-sse-idle', '#ft-burst', '#ft-retry-after', '#ft-codeaf'];
+  const ftFields = ['#ft-threshold', '#ft-recovery', '#ft-self-cancel', '#ft-window-fails', '#ft-window-secs', '#ft-cap', '#ft-sse-enabled', '#ft-sse-idle', '#ft-burst', '#ft-retry-after', '#ft-codeaf', '#ft-policy-enabled', '#ft-policy-attempts', '#ft-policy-backoffs', '#ft-policy-max-added', '#ft-policy-spill', '#ft-policy-retry-after'];
   const ftDomSnapshot = () => {
     if (!$('#ft-threshold')) return null;
     return ftFields.map((id) => {
@@ -1367,11 +1368,18 @@ async function renderFailoverTuning() {
     !!t.burstFailoverEnabled,
     !!t.honorRetryAfter,
     !!t.codeafCompatEnabled,
+    !!(t.policy403Enabled ?? true),
+    t.policy403SameKeyAttempts ?? 3,
+    (t.policy403BackoffsMs ?? [1000, 5000, 15000]).join(','),
+    Math.round((t.policy403MaxAddedLatencyMs ?? 30000) / 1000),
+    !!(t.policy403SpillEnabled ?? true),
+    !!(t.policy403HonorRetryAfter ?? true),
   ].join('|');
   // The snapshot poller re-renders this page every 5s. Never rebuild the form
   // while the user has unsaved edits — that is what was wiping typed values.
   if (ftDomSnapshot() !== null && ftDomSnapshot() !== ftStateBaseline()) return;
   host.innerHTML = `
+    <div id="policy-banner-host"></div>
     <div class="card">
       <div class="card-head">
         <h3>Failover tuning</h3>
@@ -1414,6 +1422,30 @@ async function renderFailoverTuning() {
             <label style="flex: 1; min-width: 200px;">Idle abort (30–900s)<input class="input" type="number" min="30" max="900" id="ft-sse-idle" value="${Math.round((t.sseIdleTimeoutMs || 0) / 1000)}" ${((t.sseIdleTimeoutMs || 0) > 0) ? '' : 'disabled'}><small style="color: var(--text-faint); font-size: 11px;">Max silence between streamed chunks before the turn is aborted with a log line. Keep generous: long reasoning gaps stream zero chunks and look identical to a hang.</small></label>
           </div>
         </div>
+        <div class="ft-group ft-group-recover">
+          <div class="ft-group-label">Free-tier policy-403 — transparent same-request retry (no exile)</div>
+          <p style="margin: 0 0 12px; color: var(--text-secondary); font-size: 13px;">
+            A 403 carrying the exact free-tier policy sentence is retried on the same key first (warm cache
+            kept), then spilled once to the next healthy key — never exiled, never counted against the breaker.
+            Anything unrecognized (including empty bodies) keeps today's throttle/count-only paths.
+          </p>
+          <div style="display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap;">
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px; padding-top: 24px;" title="Master switch. Off = today's count-only behavior exactly.">
+              <input type="checkbox" class="ft-input" id="ft-policy-enabled" ${(t.policy403Enabled ?? true) ? 'checked' : ''}> Retry on
+            </label>
+            <label style="flex: 1; min-width: 140px;">Same-key attempts (0–5)<input class="input" type="number" min="0" max="5" id="ft-policy-attempts" value="${t.policy403SameKeyAttempts ?? 3}"><small style="color: var(--text-faint); font-size: 11px;">Same-key retries before spill. 0 = spill-only.</small></label>
+            <label style="flex: 2; min-width: 200px;">Backoffs ms (comma-separated)<input class="input" type="text" inputmode="numeric" id="ft-policy-backoffs" value="${(t.policy403BackoffsMs ?? [1000, 5000, 15000]).join(',')}"><small style="color: var(--text-faint); font-size: 11px;">One per attempt, each 0–30000. Totals trimmed from the tail to fit the cap below.</small></label>
+            <label style="flex: 1; min-width: 140px;">Max added latency (10–90s)<input class="input" type="number" min="10" max="90" id="ft-policy-max-added" value="${Math.round((t.policy403MaxAddedLatencyMs ?? 30000) / 1000)}"><small style="color: var(--text-faint); font-size: 11px;">Upper bound for all backoff sleeps in one request.</small></label>
+          </div>
+          <div style="display: flex; gap: 16px; margin-top: 10px; align-items: center; flex-wrap: wrap;">
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="One next-healthy-key attempt after same-key retries exhaust. Off = verbatim 403 when retries fail.">
+              <input type="checkbox" class="ft-input" id="ft-policy-spill" ${(t.policy403SpillEnabled ?? true) ? 'checked' : ''}> Spill to next key
+            </label>
+            <label style="display: flex; gap: 6px; align-items: center; font-size: 13px;" title="Use the upstream Retry-After header as the backoff for that step (read-only, never writes cooldown).">
+              <input type="checkbox" class="ft-input" id="ft-policy-retry-after" ${(t.policy403HonorRetryAfter ?? true) ? 'checked' : ''}> Honor Retry-After
+            </label>
+          </div>
+        </div>
         <div class="ft-group ft-group-counts">
           <div class="ft-group-label">Failure modes — what each response does to a key</div>
           <div class="ft-legend">
@@ -1422,6 +1454,7 @@ async function renderFailoverTuning() {
             <span class="chip chip-yellow" title="Burst rate limit (no quota markers). Returned to the client verbatim — no same-request key-burning — but counts toward the breaker when Burst-failover is on, so the NEXT request spills.">burst-429 feeds breaker</span>
             <span class="chip chip-yellow" title="Quota exhaustion (402, or 429 with quota markers). Parks the key in cooldown for the upstream-supplied wait and fails over to the next key within the SAME request.">quota-429 → cooldown + failover</span>
             <span class="chip chip-yellow" title="Empty-body / throttle-phrased 403 (volume gating, not bad auth). Parks the key in a short cooldown (60s fallback, honors Retry-After) with NO quota signal, and fails over to the next key within the SAME request. Genuine auth 403s stay count-only.">throttle-403 → short cooldown + failover</span>
+            <span class="chip chip-green" title="Free-tier policy 403 (exact captured sentence). Retried on the SAME key first, then spilled once to the next healthy key — never exiled, never fed to the breaker, dashboards keep counting. Verbatim 403 only when every attempt fails.">policy-403 → same-key retry + spill</span>
             <span class="chip chip-muted" title="400/401/404 and genuine auth 403s (bad key, revoked, quota wording). Counted in REQ/ERR for honest stats, but say nothing about key health — they neither feed nor reset the breaker.">other 4xx count-only</span>
             <span class="chip chip-muted" title="Fetch threw or the client disconnected (statusCode 0: connect timeouts, aborts, hung-upstream kills). Counted as an error, but never trips — a cancelled turn must not exile a healthy key.">transport errors never trip</span>
             <span class="chip chip-muted" title="DNS down / no route / Wi-Fi off: the request never left the machine. Counted in REQ/ERR for honesty, but nothing else burns — no breaker feed, no failover cycling. The client gets HTTP 503 'Local network unreachable' instead of 'All API keys failed'.">local outage never burns</span>
@@ -1458,13 +1491,51 @@ async function renderFailoverTuning() {
     if (sseEnabledEl.checked && !(Number(sseIdleEl.value) >= 30)) sseIdleEl.value = '180';
     ftMarkDirty();
   });
+  // Changing the attempts count resets backoffs to the defaults sliced/padded
+  // to N (pad by repeating the last default) — the list length must equal the
+  // attempts or the proxy rejects the save.
+  const policyAttemptsEl = $('#ft-policy-attempts');
+  const policyBackoffsEl = $('#ft-policy-backoffs');
+  policyAttemptsEl.addEventListener('change', () => {
+    const n = Math.round(Number(policyAttemptsEl.value));
+    if (!Number.isFinite(n)) return;
+    policyAttemptsEl.value = String(Math.max(0, Math.min(5, n)));
+    const defaults = [1000, 5000, 15000];
+    const next = [];
+    for (let i = 0; i < Number(policyAttemptsEl.value); i++) next.push(defaults[Math.min(i, defaults.length - 1)]);
+    policyBackoffsEl.value = next.join(',');
+    ftMarkDirty();
+  });
   $('#ft-save').addEventListener('click', async () => {
     const num = (id) => Number($(id).value);
+    const clampInt = (v, min, max, fb) => {
+      const n = Math.round(Number(v));
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fb;
+    };
     const sseOn = $('#ft-sse-enabled').checked;
     const sseSecs = num('#ft-sse-idle');
     if (sseOn && (!Number.isFinite(sseSecs) || sseSecs < 30 || sseSecs > 900)) {
       toast('Stream idle abort must be 30–900s, or switch the watchdog off', 'error');
       return;
+    }
+    // Policy knobs clamp (never throw); the backoff list shape is validated
+    // explicitly like the sse-idle range above.
+    const policyAttempts = clampInt($('#ft-policy-attempts').value, 0, 5, 3);
+    const policyBackoffsRaw = String($('#ft-policy-backoffs').value).split(',').map((s) => s.trim()).filter((s) => s !== '');
+    const policyBackoffsParsed = policyBackoffsRaw.map((s) => Math.round(Number(s)));
+    if (policyBackoffsParsed.length !== policyAttempts || policyBackoffsParsed.some((n) => !Number.isFinite(n))) {
+      toast(`Policy backoffs must be exactly ${policyAttempts} comma-separated numbers (one per attempt)`, 'error');
+      return;
+    }
+    const policyMaxAddedMs = clampInt(num('#ft-policy-max-added') * 1000, 10000, 90000, 30000);
+    const policyBackoffs = [];
+    {
+      let used = 0;
+      for (let i = 0; i < policyAttempts; i++) {
+        const give = Math.max(0, Math.min(Math.min(Math.max(policyBackoffsParsed[i], 0), 30000), policyMaxAddedMs - used));
+        policyBackoffs.push(give);
+        used += give;
+      }
     }
     const payload = {
       circuitBreakerThreshold: num('#ft-threshold'),
@@ -1477,6 +1548,12 @@ async function renderFailoverTuning() {
       burstFailoverEnabled: $('#ft-burst').checked,
       honorRetryAfter: $('#ft-retry-after').checked,
       codeafCompatEnabled: $('#ft-codeaf').checked,
+      policy403Enabled: $('#ft-policy-enabled').checked,
+      policy403SameKeyAttempts: policyAttempts,
+      policy403BackoffsMs: policyBackoffs,
+      policy403SpillEnabled: $('#ft-policy-spill').checked,
+      policy403HonorRetryAfter: $('#ft-policy-retry-after').checked,
+      policy403MaxAddedLatencyMs: policyMaxAddedMs,
     };
     const diffBits = [];
     const prev = state.failoverTuning || {};
@@ -1490,6 +1567,11 @@ async function renderFailoverTuning() {
     if (payload.burstFailoverEnabled !== prev.burstFailoverEnabled) diffBits.push(`Burst-failover ${payload.burstFailoverEnabled ? 'on' : 'off'}`);
     if (payload.honorRetryAfter !== prev.honorRetryAfter) diffBits.push(`Honor Retry-After ${payload.honorRetryAfter ? 'on' : 'off'}`);
     if (payload.codeafCompatEnabled !== prev.codeafCompatEnabled) diffBits.push(`CodeAF compat ${payload.codeafCompatEnabled ? 'on' : 'off'}`);
+    if (payload.policy403Enabled !== (prev.policy403Enabled ?? true)) diffBits.push(`Policy-403 retry ${payload.policy403Enabled ? 'on' : 'off'}`);
+    if (payload.policy403SameKeyAttempts !== (prev.policy403SameKeyAttempts ?? 3) || JSON.stringify(payload.policy403BackoffsMs) !== JSON.stringify(prev.policy403BackoffsMs ?? [1000, 5000, 15000])) diffBits.push(`Policy depth ${prev.policy403SameKeyAttempts ?? 3}→${payload.policy403SameKeyAttempts} [${(prev.policy403BackoffsMs ?? []).join(',')}→${payload.policy403BackoffsMs.join(',')}]`);
+    if (payload.policy403MaxAddedLatencyMs !== (prev.policy403MaxAddedLatencyMs ?? 30000)) diffBits.push(`Policy cap ${fmtS(prev.policy403MaxAddedLatencyMs ?? 30000)}→${fmtS(payload.policy403MaxAddedLatencyMs)}`);
+    if (payload.policy403SpillEnabled !== (prev.policy403SpillEnabled ?? true)) diffBits.push(`Policy spill ${payload.policy403SpillEnabled ? 'on' : 'off'}`);
+    if (payload.policy403HonorRetryAfter !== (prev.policy403HonorRetryAfter ?? true)) diffBits.push(`Policy Retry-After ${payload.policy403HonorRetryAfter ? 'on' : 'off'}`);
     if (diffBits.length === 0) {
       toast('Already at these values — nothing saved', 'info');
       renderFailoverTuning();
@@ -1503,6 +1585,94 @@ async function renderFailoverTuning() {
       toast(err.message, 'error');
     }
   });
+  renderPolicyBanner();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 advisory banner: aggregates policy-403 terminal summaries
+// (policySequence masked/unmasked) over the retained logs and suggests a
+// retry depth. Dashboard-only, never auto-applies, never touches
+// exile/breaker/quota. Hidden when the sample is thin (N < 20).
+// ---------------------------------------------------------------------------
+
+function policySequences() {
+  const all = [...state.archivedLogs, ...state.recentLogs];
+  const seqs = [];
+  for (const entry of all) {
+    const m = entry.meta || {};
+    if (m.policySequence !== 'masked' && m.policySequence !== 'unmasked') continue;
+    const pr = m.policyRetry || {};
+    seqs.push({
+      masked: m.policySequence === 'masked',
+      attempts: typeof pr.attempts === 'number' ? pr.attempts : 0,
+      backoffs: Array.isArray(pr.backoffs) ? pr.backoffs : [],
+    });
+  }
+  return seqs.slice(-50);
+}
+
+function renderPolicyBanner() {
+  const host = $('#policy-banner-host');
+  if (!host) return;
+  if (state.policyBannerDismissed) { host.innerHTML = ''; return; }
+  const seqs = policySequences();
+  if (seqs.length < 20) { host.innerHTML = ''; return; }
+  const t = state.failoverTuning || {};
+  const rateAt = (d) => seqs.filter((s) => s.masked && s.attempts <= d).length / seqs.length;
+  const pct = (r) => `${Math.round(r * 100)}%`;
+  // p95 of backoff-budget sums for sequences masked at-or-below depth d.
+  const p95At = (d) => {
+    const sums = seqs.filter((s) => s.masked && s.attempts <= d)
+      .map((s) => s.backoffs.slice(0, d).reduce((a, b) => a + (typeof b === 'number' ? b : 0), 0))
+      .sort((a, b) => a - b);
+    if (!sums.length) return 0;
+    return sums[Math.min(sums.length - 1, Math.floor(sums.length * 0.95))];
+  };
+  // Spilled = attempts beyond the sequence's own backoff schedule.
+  const spilled = seqs.filter((s) => s.attempts > s.backoffs.length);
+  const spillMask = spilled.length ? spilled.filter((s) => s.masked).length / spilled.length : null;
+  let depth = 0;
+  for (const d of [1, 2, 3]) { if (rateAt(d) >= 0.9) { depth = d; break; } }
+  const defaults = [1000, 5000, 15000];
+  const suggested = depth === 0
+    ? { attempts: 3, backoffs: [...defaults] }
+    : { attempts: depth, backoffs: defaults.slice(0, depth) };
+  const curAttempts = t.policy403SameKeyAttempts ?? 3;
+  const curBackoffs = t.policy403BackoffsMs ?? [...defaults];
+  const same = curAttempts === suggested.attempts && JSON.stringify(curBackoffs) === JSON.stringify(suggested.backoffs);
+  const depthLine = depth === 0
+    ? `No depth ≤3 reaches 90% on the last ${seqs.length} policy sequences (best: depth 3 at ${pct(rateAt(3))}) — keeping depth 3 + spill.`
+    : `Depth ${depth} would have masked ${pct(rateAt(depth))} of the last ${seqs.length} policy sequences at ~${(p95At(depth) / 1000).toFixed(1)}s p95 backoff budget.`;
+  const spillLine = spillMask === null ? 'no spills observed yet' : `spill success ${pct(spillMask)} over ${spilled.length} spills`;
+  host.innerHTML = `
+    <div class="card" style="border-color: var(--accent);">
+      <div class="card-head"><h3>Policy-403 depth advisor</h3><span class="panel-meta">last ${seqs.length} policy sequences · advisory only, never auto-applies</span></div>
+      <div class="card-body">
+        <p style="margin: 0 0 4px; font-size: 13px;">${escapeHtml(depthLine)}</p>
+        <p style="margin: 0 0 12px; color: var(--text-secondary); font-size: 12px;">Mask rate — depth 1: ${pct(rateAt(1))} · depth 2: ${pct(rateAt(2))} · depth 3: ${pct(rateAt(3))} · ${escapeHtml(spillLine)}.</p>
+        ${same
+          ? `<span style="font-size: 13px; color: var(--text-secondary);">Already at the suggested values — nothing to apply.</span>`
+          : `<button class="btn btn-primary btn-sm" id="policy-apply">Apply depth ${suggested.attempts} [${suggested.backoffs.join(',')}]</button>`}
+        <button class="btn btn-sm" id="policy-dismiss" style="margin-left: 8px;">Dismiss</button>
+      </div>
+    </div>`;
+  $('#policy-dismiss').addEventListener('click', () => {
+    state.policyBannerDismissed = true;
+    renderPolicyBanner();
+  });
+  const applyBtn = $('#policy-apply');
+  if (applyBtn) {
+    // Apply reproduces the suggested values byte-identical through the same
+    // validated save path as a manual edit (clamp rules included).
+    applyBtn.addEventListener('click', () => {
+      $('#ft-policy-attempts').value = String(suggested.attempts);
+      $('#ft-policy-backoffs').value = suggested.backoffs.join(',');
+      const total = suggested.backoffs.reduce((a, b) => a + b, 0);
+      const maxEl = $('#ft-policy-max-added');
+      if (total > Number(maxEl.value) * 1000) maxEl.value = String(Math.ceil(total / 1000));
+      $('#ft-save').click();
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
