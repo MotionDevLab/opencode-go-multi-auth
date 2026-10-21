@@ -210,6 +210,24 @@ Whenever you change the source locally, rebuild before restarting:
 npm run build
 ```
 
+### Windows standalone setup (manual launch)
+
+For use with OpenCode or any compatible API client, install [Git](https://git-scm.com/download/win) and Node.js 22 or later, then run in PowerShell:
+
+```powershell
+git clone https://github.com/MotionDevLab/opencode-go-multi-auth.git
+cd opencode-go-multi-auth
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows-manual\Setup-Windows.ps1
+```
+
+Setup installs the locked dependencies, checks types, builds the router, and creates **OpenCode Router** and **Stop OpenCode Router** shortcuts on your Desktop and in **Start menu > OpenCode Router**. It also adds a Quick Start guide to that Start menu folder. No administrator access is required. Paths are resolved from the clone, so installation is not tied to a particular Windows username or folder.
+
+Use **OpenCode Router** to start a background instance and open the dashboard at `http://127.0.0.1:18904`. Launching it again reuses a healthy instance. Add API keys on the dashboard's Accounts page. Connect clients to `http://127.0.0.1:18905` (Go) or `http://127.0.0.1:18905/zen` (Zen); append `/v1` when your client expects a versioned base URL. Closing the browser leaves the router running; use **Stop OpenCode Router** to stop it.
+
+**Autorun stays disabled in a new installation.** Setup does not register a scheduled task, Windows service, Startup shortcut, registry Run entry, or OpenCode plugin. It does not start the router, edit client configuration, or alter any existing autorun settings.
+
+To recreate shortcuts for an already-built clone, rerun setup with `-SkipBuild`. Keep the clone in place and rerun setup after moving it. Settings, logs, and encrypted keys are stored in `%USERPROFILE%\.opencode`, outside the clone. Keys are machine-bound and must be added again on another machine. See [the Windows Quick Start guide](windows-manual/Quick%20Start.txt) for update commands.
+
 ## Compatibility Notes
 
 > **Note:** This project has been tested on Linux. macOS has not been tested yet — if you run into issues, please open a GitHub issue.
