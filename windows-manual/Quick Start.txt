@@ -1,0 +1,47 @@
+OpenCode Go + Zen Router
+
+Use "OpenCode Router" on your Desktop to start the router and open its dashboard.
+The same shortcuts are in Start menu > OpenCode Router.
+You can close the browser; the router keeps running until you use "Stop OpenCode Router" or sign out/reboot.
+Launch again safely to reopen the dashboard: an existing healthy instance is reused.
+
+FIRST USE
+1. Launch OpenCode Router.
+2. Open Accounts and add your OpenCode Go/Zen API key(s).
+3. Use the account's Test button to verify your key.
+4. Point your preferred API client at the Go or Zen proxy below.
+   Clients that require a /v1 base path can append /v1 to either proxy URL.
+   OpenCode is optional; provider configuration is a separate step described in README.md.
+
+Dashboard: http://127.0.0.1:18904/
+Go proxy: http://127.0.0.1:18905
+Zen proxy: http://127.0.0.1:18905/zen
+
+Setup does not install a startup task, Windows service, Startup-folder entry,
+Run registry entry, or router auto-start plugin. Existing autorun settings are not changed.
+Start the router manually before using a routed model.
+
+Installation: the folder where you cloned this repository.
+Encrypted keys, settings, usage, and logs: %USERPROFILE%\.opencode
+Startup errors: router-stderr.log and router-stdout.log in that data folder.
+REINSTALLING
+Install Git and Node.js 22 or later, then run in PowerShell:
+git clone https://github.com/MotionDevLab/opencode-go-multi-auth.git
+cd opencode-go-multi-auth
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\windows-manual\Setup-Windows.ps1
+
+Setup installs locked dependencies, checks types, builds the router, and creates
+Desktop and Start menu shortcuts. No administrator access is required.
+You can clone to any folder; shortcuts use that clone's absolute path.
+For an already-built clone, add -SkipBuild to only recreate shortcuts.
+Keep the clone in place. Rerun setup after moving it.
+Keep %USERPROFILE%\.opencode to retain settings and keys on the same machine.
+Encrypted keys are machine-bound; add them again on a different machine.
+
+Updating manually (PowerShell in the installation folder):
+git pull --ff-only
+npm.cmd ci --ignore-scripts
+npm.cmd run typecheck
+npm.cmd run build
+Then use Stop OpenCode Router and launch OpenCode Router again.
+Do not run restart-router.sh on Windows.
