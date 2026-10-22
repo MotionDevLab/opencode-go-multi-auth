@@ -1297,6 +1297,12 @@ input, select, textarea {
   word-break: break-all;
   max-height: 320px;
   overflow: auto;
+  user-select: text;
+  cursor: text;
+}
+.log-detail .log-copy-btn {
+  cursor: pointer;
+  margin-bottom: 8px;
 }
 
 .log-footer {

@@ -21,6 +21,11 @@ export interface HarnessRule {
 // compound UAs and the compat UA itself contains 'codeaf-compat'.
 export const HARNESS_RULES: HarnessRule[] = [
   { token: 'opencode/', id: 'opencode', label: 'OpenCode', blurb: 'OpenCode client' },
+  // OpenClaude sends `claude-cli/<ver> (...)` with no openclaude token, so it
+  // was classified as unknown and its shim session lumped with every other
+  // unknown. After `opencode/` (first-match-wins stays safe: opencode UAs
+  // never contain `claude-cli`).
+  { token: 'claude-cli', id: 'openclaude', label: 'OpenClaude', blurb: 'OpenClaude client' },
   { token: 'codeaf', id: 'codeaf', label: 'CodeAF', blurb: 'CodeAF client' },
   { token: 'openclaude', id: 'openclaude', label: 'OpenClaude', blurb: 'OpenClaude client' },
   { token: 'open-claude', id: 'openclaude', label: 'OpenClaude', blurb: 'OpenClaude client' },
